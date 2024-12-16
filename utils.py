@@ -136,11 +136,14 @@ class OmicDataset(Dataset):
         if len(self.data_type_dict) == 0:
             update_dict = True
         for s in input_samples:
+            # TODO: merge in utils
+            if self.sample_type_dict.get(s) is None:
+                continue
             inputs = self.input_df[s]
             target = self.target_df[s]
             small_value_indices = (inputs < 1e-4) | (target < 1e-4)
-            inputs[small_value_indices] = 1e-5
-            target[small_value_indices] = 1e-5
+            # inputs[small_value_indices] = 1e-5
+            # target[small_value_indices] = 1e-5
             # data_type: cancer type
             data_type = self.sample_type_dict[s]
             if update_dict:
