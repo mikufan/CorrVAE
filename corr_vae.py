@@ -14,6 +14,7 @@ import pandas as pd
 import utils
 import hdbscan
 from sklearn_extra.cluster import KMedoids
+from scipy.stats import pearsonr
 
 
 def vae_loss_function(recon_x, x, mu, logvar):
@@ -27,7 +28,7 @@ def vae_loss_function(recon_x, x, mu, logvar):
 
 class CorrVAE(nn.Module):
     def __init__(self, hidden_dim, latent_dim, embedding_dim, n_feats, type_embedding_dim, n_types,
-                 device, is_nc=False):
+                 n_phs, n_acs, device):
         super(CorrVAE, self).__init__()
 
         self.device = device
@@ -37,15 +38,27 @@ class CorrVAE(nn.Module):
         # self.fc1 = nn.Linear(embedding_dim, hidden_dim)
         self.fc2_mu = nn.Linear(hidden_dim + type_embedding_dim, latent_dim)
         self.fc2_logvar = nn.Linear(hidden_dim + type_embedding_dim, latent_dim)
-        self.nc_fc1 = nn.Linear(embedding_dim, hidden_dim)
+
+        if n_phs == 0 and n_acs == 0:
+            mid_dim = hidden_dim
+        elif (n_phs != 0 and n_acs == 0) or (n_phs == 0 and n_acs != 0):
+            mid_dim = 2 * hidden_dim
+        else:
+            mid_dim = 3 * hidden_dim
+        self.merge_hidden = nn.Sequential(nn.Linear(mid_dim, hidden_dim),
+                                          nn.ReLU())
+        self.mlp_ph_encoder = nn.Sequential(
+            nn.Linear(n_phs, hidden_dim),
+            nn.ReLU()
+        )
 
         # Embedding
         self.gene_embedding = nn.Embedding(n_feats, embedding_dim)
-        self.protein_embedding = nn.Embedding(n_feats, embedding_dim)
         self.type_embedding = nn.Embedding(n_types, type_embedding_dim)
         # Decoder
         # self.fc3 = nn.Linear(latent_dim, hidden_dim)
-        self.fc3 = nn.Linear(latent_dim + type_embedding_dim, hidden_dim)
+        # self.fc3 = nn.Linear(latent_dim + type_embedding_dim, hidden_dim)
+        self.fc3 = nn.Linear(latent_dim + type_embedding_dim, embedding_dim)
         self.fc4 = nn.Linear(hidden_dim, n_feats)
         self.nc_fc4 = nn.Linear(hidden_dim, embedding_dim)
         self.decode_embedding = nn.Linear(embedding_dim, n_feats)
@@ -53,8 +66,15 @@ class CorrVAE(nn.Module):
         # self.logger = utils.get_logger('../output/log/train_log.log')
         self.logger = None
 
-    def encode(self, x, data_type, gene_feats):
+    def encode(self, x, data_type, ph_x=None, ac_x=None):
         h1 = torch.relu(self.feat_fc(x))
+        if ph_x is not None:
+            ph_x = torch.unsqueeze(ph_x, 1)
+            ph_h = self.mlp_ph_encoder(ph_x)
+            ph_h = torch.squeeze(ph_h, 1)
+            h1 = torch.cat((h1, ph_h), 1)
+            h1 = self.merge_hidden(h1)
+            h1 = torch.relu(h1)
         emb_type = self.type_embedding(data_type)
         h1 = torch.cat((h1, emb_type), 1)
         return self.fc2_mu(h1), self.fc2_logvar(h1), emb_type
@@ -73,12 +93,23 @@ class CorrVAE(nn.Module):
 
         return recon_y, y
 
-    def forward(self, x, y, data_type, gene_feats, is_train=True):
+    def z_forward(self, x, data_type, ph_x=None, ac_x=None):
+        x = x.to(self.device)
+        data_type = data_type.to(self.device)
+        mu, logvar, emb_type = self.encode(x, data_type, ph_x=ph_x, ac_x=ac_x)
+        logvar = torch.clamp(logvar, min=-10, max=10)
+        z = self.reparameterize(mu, logvar)
+        return z
+
+    def forward(self, x, y, data_type, is_train=True, ph_x=None, ac_x=None):
         x = x.to(self.device)
         y = y.to(self.device)
         data_type = data_type.to(self.device)
-        gene_feats = gene_feats.to(self.device)
-        mu, logvar, emb_type = self.encode(x, data_type, gene_feats)
+        if ph_x is not None:
+            ph_x = ph_x.to(self.device)
+        if ac_x is not None:
+            ac_x = ac_x.to(self.device)
+        mu, logvar, emb_type = self.encode(x, data_type, ph_x=ph_x, ac_x=ac_x)
         logvar = torch.clamp(logvar, min=-10, max=10)
         # log_var_numpy = logvar.cpu().detach().numpy()
         # mu_var_numpy = mu.cpu().detach().numpy()
@@ -95,8 +126,8 @@ class CorrVAE(nn.Module):
         self.logger.info("Model constructed.")
         self.logger.info("Start training ...")
         best_result = 0.0
-        n_feats = self.gene_embedding.weight.data.shape[0]
-        input_genes = torch.tensor([i for i in range(n_feats)])
+        # n_feats = self.gene_embedding.weight.data.shape[0]
+        n_feats = self.decode_embedding.weight.data.shape[0]
         for n in range(n_epochs):
             self.train()
             n_batch = len(train_data)
@@ -109,10 +140,20 @@ class CorrVAE(nn.Module):
                 batch_data_type = [d.data_type_id for d in data_batch]
                 batch_input = torch.tensor(batch_input, dtype=torch.float32)
                 batch_target = torch.tensor(batch_target, dtype=torch.float32)
-                batch_input_genes = input_genes.unsqueeze(0).expand(batch_size, -1)
                 batch_data_type = torch.tensor(batch_data_type)
+                # ptm input
+                batch_ph_input = [d.ph_inputs for d in data_batch] \
+                    if train_data.dataset.dataset.ph_df is not None else None
+                batch_ac_input = [d.ac_inputs for d in data_batch] \
+                    if train_data.dataset.dataset.ac_df is not None else None
+                if batch_ph_input is not None:
+                    batch_ph_input = torch.tensor(batch_ph_input, dtype=torch.float32)
+                if batch_ac_input is not None:
+                    batch_ac_input = torch.tensor(batch_ac_input, dtype=torch.float32)
+
                 self.optimizer.zero_grad()
-                batch_loss = self.forward(batch_input, batch_target, batch_data_type, batch_input_genes)
+                batch_loss = self.forward(batch_input, batch_target, batch_data_type, ph_x=batch_ph_input,
+                                          ac_x=batch_ac_input)
                 batch_loss.backward()
                 self.optimizer.step()
                 total_loss += batch_loss
@@ -130,9 +171,19 @@ class CorrVAE(nn.Module):
                 valid_batch_input = torch.tensor(valid_batch_input, dtype=torch.float32)
                 valid_batch_target = torch.tensor(valid_batch_target, dtype=torch.float32)
                 valid_batch_data_type = torch.tensor(valid_batch_data_type)
-                valid_batch_input_genes = input_genes.unsqueeze(0).expand(batch_size, -1)
+
+                # ptm input
+                valid_batch_ph_input = [d.ph_inputs for d in valid_data_batch] \
+                    if valid_data.dataset.dataset.ph_df is not None else None
+                valid_batch_ac_input = [d.ac_inputs for d in valid_data_batch] \
+                    if valid_data.dataset.dataset.ac_df is not None else None
+                if valid_batch_ph_input is not None:
+                    valid_batch_ph_input = torch.tensor(valid_batch_ph_input, dtype=torch.float32)
+                if valid_batch_ac_input is not None:
+                    valid_batch_ac_input = torch.tensor(valid_batch_ac_input, dtype=torch.float32)
+
                 preds, targets = self.forward(valid_batch_input, valid_batch_target, valid_batch_data_type,
-                                              valid_batch_input_genes, False)
+                                              is_train=False, ph_x=valid_batch_ph_input,ac_x=valid_batch_ac_input)
                 preds = preds.cpu().detach().numpy()
                 targets = targets.cpu().detach().numpy()
                 for i in range(batch_size):
@@ -150,14 +201,14 @@ class CorrVAE(nn.Module):
         n_batch = len(data_loader)
         data_type_dict = data_loader.dataset.dataset.data_type_dict
         id_2_type_dict = {}
-        for key,value in data_type_dict.items():
+        for key, value in data_type_dict.items():
             id_2_type_dict[value] = key
         self.eval()
         all_preds = []
         all_targets = []
         all_types = []
-        n_feats = self.gene_embedding.weight.data.shape[0]
-        input_genes = torch.tensor([i for i in range(n_feats)])
+
+        n_feats = self.decode_embedding.weight.data.shape[0]
         for test_data_batch in tqdm(data_loader, mininterval=2, desc=' -Tot it %d' % n_batch,
                                     leave=True, file=sys.stdout):
             batch_size = len(test_data_batch)
@@ -167,9 +218,18 @@ class CorrVAE(nn.Module):
             batch_input = torch.tensor(batch_input, dtype=torch.float32)
             batch_target = torch.tensor(batch_target, dtype=torch.float32)
             batch_data_type = torch.tensor(batch_data_type)
-            batch_input_genes = input_genes.unsqueeze(0).expand(batch_size, -1)
-            preds, targets = self.forward(batch_input, batch_target, batch_data_type,
-                                          batch_input_genes, False)
+            # ptm input
+            batch_ph_input = [d.ph_inputs for d in test_data_batch] \
+                if data_loader.dataset.dataset.ph_df is not None else None
+            batch_ac_input = [d.ac_inputs for d in test_data_batch] \
+                if data_loader.dataset.dataset.ac_df is not None else None
+            if batch_ph_input is not None:
+                batch_ph_input = torch.tensor(batch_ph_input, dtype=torch.float32)
+            if batch_ac_input is not None:
+                batch_ac_input = torch.tensor(batch_ac_input, dtype=torch.float32)
+
+            preds, targets = self.forward(batch_input, batch_target, batch_data_type, is_train=False,
+                                          ph_x=batch_ph_input, ac_x=batch_ac_input)
             preds = preds.cpu().detach().numpy()
             targets = targets.cpu().detach().numpy()
             for i in range(batch_size):
@@ -180,26 +240,26 @@ class CorrVAE(nn.Module):
         all_preds = np.hstack(all_preds)
         res_array = np.column_stack((all_targets, all_preds))
         res_df = pd.DataFrame(res_array, columns=['target', 'prediction'])
-        res_df.to_csv(result_path+".csv")
-        all_diffs = (all_targets-all_preds) ** 2
+        res_df.to_csv(result_path + ".csv")
+        all_diffs = (all_targets - all_preds) ** 2
         all_diffs = all_diffs.reshape(-1, n_feats)
         all_types = np.hstack(all_types)
         df = pd.DataFrame(all_diffs)
-        all_type_names = [id_2_type_dict[type_id] for type_id in all_types ]
+        all_type_names = [id_2_type_dict[type_id] for type_id in all_types]
         df['label'] = all_type_names
         grouped_means = df.groupby('label').mean()
         grouped_means_df = pd.DataFrame(grouped_means)
         grouped_means_df.columns = data_loader.dataset.dataset.feat_list
-        grouped_means_df.to_csv(result_path+"_diff.csv")
+        grouped_means_df.to_csv(result_path + "_diff.csv")
         total_r2 = r2_score(all_targets, all_preds)
-        return total_r2
+        pcc = pearsonr(all_targets, all_preds)
+        return total_r2, pcc
 
     def visualize_emb(self, feat_list, model_class, method="tsne", cluster_method="kmeans", num_clusters=9):
         if model_class == 1:
             class_name = "TUMOR"
         else:
             class_name = "NORMAL"
-        # embeds = self.protein_embedding.weight.data.cpu().detach().numpy()
         embeds = self.decode_embedding.weight.data.cpu().detach().numpy()
         print(embeds.shape)
         # 降维并可视化
@@ -234,6 +294,7 @@ class CorrVAE(nn.Module):
         plt.figure(figsize=(10, 7))
         if cluster_method == "dbscan":
             unique_clusters = np.unique(clusters)
+            colors = plt.cm.rainbow(np.linspace(0, 1, len(unique_clusters)))
             for cluster in unique_clusters:
                 if cluster == -1:
                     # 噪声点
@@ -241,7 +302,9 @@ class CorrVAE(nn.Module):
                     plt.scatter(cluster_data[:, 0], cluster_data[:, 1], label='Noise', s=6, c='black')
                 else:
                     cluster_data = data_2d[clusters == cluster]
-                    plt.scatter(cluster_data[:, 0], cluster_data[:, 1], label=f'Cluster {cluster + 1}', s=6)
+                    plt.scatter(cluster_data[:, 0], cluster_data[:, 1], c=colors[cluster],
+                                label=f'Cluster {cluster + 1}', s=6)
+                    # plt.scatter(cluster_data[:, 0], cluster_data[:, 1], label=f'Cluster {cluster + 1}', s=6)
         else:
             for i in range(num_clusters):
                 cluster_data = data_2d[clusters == i]
@@ -256,10 +319,12 @@ class CorrVAE(nn.Module):
             plt.xlabel('UMAP Component 1')
             plt.ylabel('UMAP Component 2')
             plt.legend(title='Cluster')
-            plt.savefig(f"../output/model_fig/corr_model_vae_umap_embeddings_{num_clusters}_{class_name}_{method_name}")
+            plt.savefig(f"../output/model_fig/corr_model_vae_umap_embeddings_{num_clusters}_{class_name}_{method_name}.svg",
+                        format="svg")
         feat_cluster_dict = {"Gene Name": feat_list, "Cluster": clusters}
         feat_cluster_df = pd.DataFrame.from_dict(feat_cluster_dict)
-        feat_cluster_df.to_csv(f"../output/clusters/corr_model_vae_gene_clusters_{num_clusters}_{class_name}_{method_name}.csv")
+        feat_cluster_df.to_csv(
+            f"../output/clusters/corr_model_vae_gene_clusters_{num_clusters}_{class_name}_{method_name}.csv")
 
     def visualize_spectral_emb(self, feat_list, model_class):
         embeds = self.decode_embedding.weight.data.cpu().detach().numpy()
@@ -278,13 +343,13 @@ class CorrVAE(nn.Module):
         plt.figure(figsize=(10, 7))
         for i in range(num_clusters):
             cluster_data = data_2d[clusters == i]
-            plt.scatter(cluster_data[:, 0], cluster_data[:, 1], label=f'Cluster {i + 1}', s=6)
+            plt.scatter(cluster_data[:, 0], cluster_data[:, 1], label=f'Cluster {i + 1}', s=4)
 
         plt.title('UMAP Visualization of Gene Embeddings')
         plt.xlabel('UMAP Component 1')
         plt.ylabel('UMAP Component 2')
         plt.legend(title='Cluster')
-        plt.savefig(f"../output/model_fig/vae_umap_spec_embeddings_{num_clusters}_{class_name}")
+        plt.savefig(f"../output/model_fig/vae_umap_spec_embeddings_{num_clusters}_{class_name}.svg", format="svg")
 
         feat_cluster_dict = {"Gene Name": feat_list, "Cluster": clusters}
         feat_cluster_df = pd.DataFrame.from_dict(feat_cluster_dict)
