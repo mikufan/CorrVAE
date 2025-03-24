@@ -161,11 +161,16 @@ def read_sample_dict(sample_dict, data_class):
     sample_dict_df = pd.read_csv(sample_dict, index_col=0)
     sample_type_dict = {}
     for sample_type in sample_dict_df.index:
-        if sample_type.split("_")[1] != data_class:
-            continue
-        sample_list = sample_dict_df.loc[sample_type, :].dropna()
-        for s in sample_list:
-            sample_type_dict[s] = sample_type.split("_")[0]
+        if data_class != "TUMOR AND NORMAL":
+            if sample_type.split("_")[1] != data_class:
+                continue
+            sample_list = sample_dict_df.loc[sample_type, :].dropna()
+            for s in sample_list:
+                sample_type_dict[s] = sample_type.split("_")[0]
+        else:
+            sample_list = sample_dict_df.loc[sample_type, :].dropna()
+            for s in sample_list:
+                sample_type_dict[s] = sample_type
     return sample_type_dict
 
 
@@ -234,6 +239,7 @@ class OmicDataset(Dataset):
         else:
             self.ac_df = None
         self.read_data(data_class)
+        self.type_name_dict = {v: k for k, v in self.data_type_dict.items()}
 
     def __len__(self):
         return len(self.data_items)
@@ -253,10 +259,13 @@ class OmicDataset(Dataset):
         return feat_list
 
     def read_data(self, data_class):
-        if data_class == "NORMAL":
-            input_samples = [col for col in self.input_df.columns if col.endswith('.N')]
+        if data_class != "TUMOR AND NORMAL":
+            if data_class == "NORMAL":
+                input_samples = [col for col in self.input_df.columns if col.endswith('.N')]
+            else:
+                input_samples = [col for col in self.input_df.columns if not col.endswith('.N')]
         else:
-            input_samples = [col for col in self.input_df.columns if not col.endswith('.N')]
+            input_samples = [col for col in self.input_df.columns]
         update_dict = False
         if len(self.data_type_dict) == 0:
             update_dict = True

@@ -1,6 +1,6 @@
 import argparse
 from corr_vae_model import utils
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 import corr_vae
 import corr_vae_pair_model
 import torch
@@ -40,22 +40,28 @@ if __name__ == "__main__":
     parser.add_argument('--load_model_path', '-l', default='trained_corr_vae_model.pt')
     parser.add_argument('--trained_model_path', '-tp', default='vae_pair_model_')
     parser.add_argument('--model_class', '-mc', type=int, default=1)
-
+    parser.add_argument('--unified_train', '-ut', action='store_true', default=False)
+    parser.add_argument('--unified_model', '-um', action='store_true', default=False)
     # clustering
     parser.add_argument('--compare_cluster', '-cc', action='store_true', default=False)
     parser.add_argument('--compare_correlation', '-ccr', action='store_true', default=False)
     parser.add_argument('--num_clusters', '-nc', type=int, default=9)
     parser.add_argument('--visualize', '-v', action='store_true', default=False)
     parser.add_argument('--cluster_method', '-cm', type=str, default='kmeans')
+    parser.add_argument('--lv_visualize', '-lv', action='store_true', default=False)
 
     args = parser.parse_args()
     gene_dict = "../data/gene_dict.csv"
-    if args.model_class == 1:
-        print("Reading tumor data ...")
-        model_class = "TUMOR"
+    if not args.unified_train:
+        if args.model_class == 1:
+            print("Reading tumor data ...")
+            model_class = "TUMOR"
+        else:
+            print("Reading normal data ...")
+            model_class = "NORMAL"
     else:
-        print("Reading normal data ...")
-        model_class = "NORMAL"
+        print("Reading tumor and normal data ...")
+        model_class = "TUMOR AND NORMAL"
     if args.use_ph:
         ph_input = args.ph_input
     else:
@@ -73,7 +79,7 @@ if __name__ == "__main__":
         n_phs = len(model_data.ph_df)
     if model_data.ac_df is not None:
         n_acs = len(model_data.ac_df)
-    batch_data = DataLoader(model_data, batch_size=args.batch_size, shuffle=True, collate_fn=utils.collate_fn)
+
     print('Loading trained model')
     load_model_name = args.load_model_path
     load_model = torch.load(args.model_output + "/" + load_model_name)
@@ -83,16 +89,76 @@ if __name__ == "__main__":
     if args.device != "cpu":
         device = torch.device(args.device if torch.cuda.is_available() else "cpu")
         load_model.to(device)
-    if not args.test_only:
-        pair_model = corr_vae_pair_model.VAEPairModel(load_model, args.hidden_dim, args.latent_dim, args.embedding_dim,
-                                                      n_feats, args.type_embedding_dim, args.device)
-        pair_model.to(device)
-        pair_model.pair_model_training(batch_data, args.n_epoch, batch_data, args.model_output, args.no_type)
-    else:
-        model_path = args.model_output + "/" + args.trained_model_path + model_class + ".pt"
-        pair_model = torch.load(model_path)
 
-    if args.visualize:
-        pair_model.visualize_emb(model_data.feat_list, args.model_class, method="UMAP",
-                                 cluster_method=args.cluster_method, num_clusters=args.num_clusters)
-    torch.save(pair_model, args.model_output + f"/vae_pair_model_{model_class}.pt")
+    if not args.unified_train:
+        batch_data = DataLoader(model_data, batch_size=args.batch_size, shuffle=True, collate_fn=utils.collate_fn)
+        if not args.test_only:
+            pair_model = corr_vae_pair_model.VAEPairModel(load_model, args.hidden_dim, args.latent_dim,
+                                                          args.embedding_dim,
+                                                          n_feats, args.type_embedding_dim, args.device)
+            pair_model.to(device)
+            pair_model.pair_model_training(batch_data, args.n_epoch, batch_data, args.model_output, args.no_type)
+        else:
+            model_path = args.model_output + "/" + args.trained_model_path + model_class + ".pt"
+            pair_model = torch.load(model_path)
+
+        if args.visualize:
+            pair_model.visualize_emb(model_data.feat_list, args.model_class, method="UMAP",
+                                     cluster_method=args.cluster_method, num_clusters=args.num_clusters)
+        torch.save(pair_model, args.model_output + f"/vae_pair_model_{model_class}.pt")
+    else:
+        if not args.unified_model:
+            normal_indices = [idx for idx in range(len(model_data))
+                              if model_data[idx].sample_id.endswith('.N')]
+            tumor_indices = [idx for idx in range(len(model_data))
+                             if not model_data[idx].sample_id.endswith('.N')]
+            normal_model_data = Subset(model_data, normal_indices)
+            tumor_model_data = Subset(model_data, tumor_indices)
+            batch_normal_data = DataLoader(normal_model_data, batch_size=args.batch_size, shuffle=True,
+                                           collate_fn=utils.collate_fn)
+            batch_tumor_data = DataLoader(tumor_model_data, batch_size=args.batch_size, shuffle=True,
+                                          collate_fn=utils.collate_fn)
+            if not args.test_only:
+                pair_normal_model = corr_vae_pair_model.VAEPairModel(load_model, args.hidden_dim, args.latent_dim,
+                                                                     args.embedding_dim,
+                                                                     n_feats, args.type_embedding_dim, args.device)
+                pair_tumor_model = corr_vae_pair_model.VAEPairModel(load_model, args.hidden_dim, args.latent_dim,
+                                                                    args.embedding_dim,
+                                                                    n_feats, args.type_embedding_dim, args.device)
+                pair_normal_model.to(device)
+                pair_normal_model.pair_model_training(batch_normal_data, args.n_epoch, args.model_output,
+                                                      args.no_type, decode_type="y")
+                pair_tumor_model.to(device)
+                pair_tumor_model.pair_model_training(batch_tumor_data, args.n_epoch, args.model_output,
+                                                     args.no_type, decode_type="y")
+            else:
+                pair_normal_model_path = args.model_output + "/" + args.trained_model_path + "TUMOR_NORMAL_normal_part.pt"
+                pair_tumor_model_path = args.model_output + "/" + args.trained_model_path + "TUMOR_NORMAL_tumor_part.pt"
+                pair_normal_model = torch.load(pair_normal_model_path)
+                pair_tumor_model = torch.load(pair_tumor_model_path)
+                # pair_normal_model.to(device)
+                # pair_tumor_model.to(device)
+            if args.visualize:
+                pair_normal_model.visualize_emb(model_data.feat_list, 2, method="UMAP",
+                                                cluster_method=args.cluster_method, num_clusters=args.num_clusters)
+                pair_tumor_model.visualize_emb(model_data.feat_list, 1, method="UMAP",
+                                               cluster_method=args.cluster_method, num_clusters=args.num_clusters)
+            torch.save(pair_normal_model, args.model_output + f"/vae_pair_model_TUMOR_NORMAL_normal_part.pt")
+            torch.save(pair_tumor_model, args.model_output + f"/vae_pair_model_TUMOR_NORMAL_tumor_part.pt")
+        else:
+            batch_data = DataLoader(model_data, batch_size=args.batch_size, shuffle=True, collate_fn=utils.collate_fn)
+            if not args.test_only:
+                pair_model = corr_vae_pair_model.VAEPairModel(load_model, args.hidden_dim, args.latent_dim,
+                                                              args.embedding_dim,
+                                                              n_feats * 2, args.type_embedding_dim, args.device)
+                pair_model.to(device)
+                pair_model.pair_model_training(batch_data, args.n_epoch, args.model_output,
+                                               args.no_type, decode_type="y")
+            else:
+                model_path = args.model_output + "/" + args.trained_model_path + "TUMOR_NORMAL_unified.pt"
+                pair_model = torch.load(model_path)
+            if args.visualize:
+                pair_model.visualize_emb_um(model_data.feat_list,cluster_method=args.cluster_method,
+                                            num_clusters=args.num_clusters)
+            torch.save(pair_model, args.model_output + f"/vae_pair_model_TUMOR_NORMAL_unified.pt")
+            pair_model.distance_analysis(model_data.feat_list)
