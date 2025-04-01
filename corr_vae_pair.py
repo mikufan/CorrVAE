@@ -49,6 +49,7 @@ if __name__ == "__main__":
     parser.add_argument('--visualize', '-v', action='store_true', default=False)
     parser.add_argument('--cluster_method', '-cm', type=str, default='kmeans')
     parser.add_argument('--lv_visualize', '-lv', action='store_true', default=False)
+    parser.add_argument("--common_type", '-ct', action='store_true', default=False)
 
     args = parser.parse_args()
     gene_dict = "../data/gene_dict.csv"
@@ -72,7 +73,7 @@ if __name__ == "__main__":
         ac_input = None
 
     model_data = utils.OmicDataset(args.input, args.target, args.sample_dict, model_class, feat_dict=gene_dict,
-                                   ph_input=ph_input, ac_input=ac_input)
+                                   ph_input=ph_input, ac_input=ac_input,common_type=args.common_type)
     n_phs = 0
     n_acs = 0
     if model_data.ph_df is not None:
@@ -157,8 +158,13 @@ if __name__ == "__main__":
             else:
                 model_path = args.model_output + "/" + args.trained_model_path + "TUMOR_NORMAL_unified.pt"
                 pair_model = torch.load(model_path)
+                _, _, zs, types = pair_model.pair_model_inference(batch_data, decode_type="y")
+                if args.lv_visualize:
+                    type_name_dict = batch_data.dataset.dataset.type_name_dict \
+                        if isinstance(batch_data, Subset) else batch_data.dataset.type_name_dict
+                    pair_model.lv_visualize(zs, types, type_name_dict)
             if args.visualize:
-                pair_model.visualize_emb_um(model_data.feat_list,cluster_method=args.cluster_method,
+                pair_model.visualize_emb_um(model_data.feat_list, cluster_method=args.cluster_method,
                                             num_clusters=args.num_clusters)
             torch.save(pair_model, args.model_output + f"/vae_pair_model_TUMOR_NORMAL_unified.pt")
             pair_model.distance_analysis(model_data.feat_list)

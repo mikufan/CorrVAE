@@ -30,7 +30,8 @@ def vae_loss_function(recon_x, x, mu, logvar):
 
 def get_um_idx(type_list, name_dict):
     data_type_names = []
-    type_list = type_list.cpu().detach().numpy()
+    if isinstance(type_list, torch.Tensor):
+        type_list = type_list.cpu().detach().numpy()
     normal_idx = []
     tumor_idx = []
     for i, t in enumerate(type_list):
@@ -39,6 +40,23 @@ def get_um_idx(type_list, name_dict):
             normal_idx.append(i)
         else:
             tumor_idx.append(i)
+    return tumor_idx, normal_idx
+
+
+def get_common_um_idx(type_list, name_dict):
+    if isinstance(type_list, torch.Tensor):
+        type_list = type_list.cpu().detach().numpy()
+    normal_idx = []
+    tumor_idx = []
+    for i, t in enumerate(type_list):
+        data_type_name = name_dict[t]
+        if data_type_name.endswith("NORMAL"):
+            normal_idx.append(i)
+        else:
+            type_name = data_type_name.split("_")[0]
+            type_list = ["CCRCC", "LSCC", "LUAD", "HNSCC", "PDAC"]
+            if type_name in type_list:
+                tumor_idx.append(i)
     return tumor_idx, normal_idx
 
 
@@ -170,9 +188,9 @@ class VAEPairModel(nn.Module):
             n_batch = len(train_data)
             total_loss = 0.0
             train_ph_df = train_data.dataset.dataset.ph_df \
-                if isinstance(train_data, Subset) else train_data.dataset.ph_df
+                if isinstance(train_data.dataset, Subset) else train_data.dataset.ph_df
             type_name_dict = train_data.dataset.dataset.type_name_dict \
-                if isinstance(train_data, Subset) else train_data.dataset.type_name_dict
+                if isinstance(train_data.dataset, Subset) else train_data.dataset.type_name_dict
             for data_batch in tqdm(train_data, mininterval=2, desc=' -Tot it %d' % n_batch,
                                    leave=True, file=sys.stdout):
                 batch_size = len(data_batch)
@@ -203,6 +221,7 @@ class VAEPairModel(nn.Module):
             self.eval()
             all_targets = []
             all_preds = []
+            all_zs = []
             for valid_data_batch in tqdm(valid_data, mininterval=2, desc=' -Tot it %d' % n_valid_batch,
                                          leave=True, file=sys.stdout):
                 batch_size = len(valid_data_batch)
@@ -245,11 +264,73 @@ class VAEPairModel(nn.Module):
             total_r2 = r2_score(all_targets, all_preds)
             self.logger.info("Total validation R2 score in epoch " + str(n) + ": " + str(total_r2))
             pcc, _ = stats.pearsonr(all_targets, all_preds)
+            print("PCC in epoch " + str(n) + ": " + str(pcc))
             # if total_r2 > best_result:
             #     best_result = total_r2
             #     torch.save(self, model_path + "/trained_corr_ptm_vae_model.pt")
             torch.save(self, model_path + "/trained_corr_pair_vae_model.pt")
             # self.logger.info("Best result so far: " + str(best_result))
+
+    def pair_model_inference(self, infer_data, no_type=False, decode_type="all"):
+        self.logger = utils.get_logger('../output/log/infer_log.log')
+        self.logger.info("Start inference ...")
+        n_infer_batch = len(infer_data)
+        self.eval()
+        all_targets = []
+        all_preds = []
+        all_zs = []
+        all_types = []
+        infer_ph_df = infer_data.dataset.dataset.ph_df \
+            if isinstance(infer_data.dataset, Subset) else infer_data.dataset.ph_df
+        type_name_dict = infer_data.dataset.dataset.type_name_dict \
+            if isinstance(infer_data.dataset, Subset) else infer_data.dataset.type_name_dict
+        for infer_data_batch in tqdm(infer_data, mininterval=2, desc=' -Tot it %d' % n_infer_batch,
+                                     leave=True, file=sys.stdout):
+            batch_size = len(infer_data_batch)
+            infer_batch_input = [d.input_feat for d in infer_data_batch]
+            infer_batch_target = [d.target_feat for d in infer_data_batch]
+            infer_batch_data_type = [d.data_type_id for d in infer_data_batch]
+            infer_batch_ph_input = [d.ph_inputs for d in infer_data_batch] \
+                if infer_ph_df is not None else None
+            infer_batch_input = torch.tensor(infer_batch_input, dtype=torch.float32)
+            infer_batch_target = torch.tensor(infer_batch_target, dtype=torch.float32)
+            infer_batch_data_type = torch.tensor(infer_batch_data_type)
+            if infer_batch_ph_input is not None:
+                infer_batch_ph_input = torch.tensor(infer_batch_ph_input, dtype=torch.float32)
+            infer_batch_z = self.corr_vae_model.z_forward(infer_batch_input, infer_batch_data_type,
+                                                          ph_x=infer_batch_ph_input)
+            if decode_type == "y":
+                preds_y, targets_y = self.forward_y(infer_batch_target, infer_batch_z, infer_batch_data_type,
+                                                    type_name_dict, ph_x=infer_batch_ph_input, is_train=False,
+                                                    no_type=no_type)
+                preds_y = preds_y.cpu().detach().numpy()
+                targets_y = targets_y.cpu().detach().numpy()
+                for i in range(batch_size):
+                    all_targets.append(targets_y[i])
+                    all_preds.append(preds_y[i])
+            else:
+                preds_x, targets_x, preds_y, targets_y = self.forward(infer_batch_input, infer_batch_target,
+                                                                      infer_batch_z, infer_batch_data_type,
+                                                                      ph_x=infer_batch_ph_input, is_train=False,
+                                                                      no_type=no_type)
+                preds_x = preds_x.cpu().detach().numpy()
+                targets_x = targets_x.cpu().detach().numpy()
+                preds_y = preds_y.cpu().detach().numpy()
+                targets_y = targets_y.cpu().detach().numpy()
+                for i in range(batch_size):
+                    all_targets.append(np.concatenate((targets_x[i], targets_y[i])))
+                    all_preds.append(np.concatenate((preds_x[i], preds_y[i])))
+            all_zs.append(infer_batch_z.cpu().detach().numpy())
+            all_types.append(infer_batch_data_type)
+        all_targets = np.hstack(all_targets)
+        all_preds = np.hstack(all_preds)
+        all_zs = np.vstack(all_zs)
+        all_types = np.hstack(all_types)
+        total_r2 = r2_score(all_targets, all_preds)
+        self.logger.info("Total R2 score in inferred data: " + str(total_r2))
+        pcc, _ = stats.pearsonr(all_targets, all_preds)
+        print("PCC in inferred data: " + str(pcc))
+        return total_r2, pcc, all_zs, all_types
 
     def visualize_emb(self, feat_list, model_class, method="tsne", cluster_method="kmeans", num_clusters=9):
         if model_class == 1:
@@ -336,6 +417,7 @@ class VAEPairModel(nn.Module):
         all_data_2d = umap_reducer.fit_transform(all_embeds)
         np.savetxt(f"../output/vae_pair_model/UM_NORMAL.txt", normal_data_2d, fmt='%f', delimiter=' ')
         np.savetxt(f"../output/vae_pair_model/UM_TUMOR.txt", tumor_data_2d, fmt='%f', delimiter=' ')
+        method_name = "SPECTRAL"
         plt.figure(figsize=(10, 7))
         normal_class_name = "UM_NORMAL"
         tumor_class_name = "UM_TUMOR"
@@ -394,19 +476,55 @@ class VAEPairModel(nn.Module):
         plt.savefig(
             f"../output/model_fig/vae_pair_umap_embeddings_{num_clusters}_{tumor_normal_cluster_class_name}_{method_name}")
 
+    def lv_visualize(self, zs, types, type_name_dict):
+        umap_reducer = umap.UMAP(n_components=2, random_state=42)
+        zs_2d = umap_reducer.fit_transform(zs)
+        type_color_dict = {"BRCA_TUMOR":"#FFB6C1","CCRCC_TUMOR":"#DC143C","HNSCC_TUMOR":"#DB7093","HGSC_TUMOR":"#FF69B4",
+                           "LUAD_TUMOR":"#FF1493","LSCC_TUMOR":"#C71585","GBM_TUMOR":"#FF00FF","COAD_TUMOR":"#FFFF00",
+                           "PDAC_TUMOR":"#CD853F",
+                           "UCEC_TUMOR":"#FFA500","CCRCC_NORMAL":"#0000FF","HNSCC_NORMAL":"#00BFFF", "LUAD_NORMAL":"#00CED1",
+                           "LSCC_NORMAL":"#2E8B57","PDAC_NORMAL":"#E1FFFF"}
+        # draw_list = [0,10] #LSCC
+        # draw_list = [1,9]#CCRCC
+        # draw_list = [2,5]#HNSCC
+        # draw_list = [3,8]#LUAD
+        draw_list = [4,14]#PDAC
+        # tsne = TSNE(n_components=2, random_state=42)
+        # zs_2d = tsne.fit_transform(zs)
+        zs_df = pd.DataFrame(data={"X": zs_2d[:, 0], "Y": zs_2d[:, 1], "DataType": types})
+        # tumor_idx, normal_idx = get_common_um_idx(types, type_name_dict)
+        tumor_idx, normal_idx = get_um_idx(types, type_name_dict)
+        unique_types = np.unique(types)
+        plt.figure(figsize=(10, 7))
+        for i in unique_types:
+            if i in draw_list:
+                type_idx = zs_df[zs_df['DataType'] == i].index.tolist()
+                type_name = type_name_dict[i]
+                plt.scatter(zs_2d[type_idx, 0], zs_2d[type_idx, 1], s=40, c=type_color_dict[type_name])
+            else:
+                continue
+        # plt.scatter(zs_2d[tumor_idx, 0], zs_2d[tumor_idx, 1], s=20, c="red")
+        # plt.scatter(zs_2d[normal_idx, 0], zs_2d[normal_idx, 1], s=20, c="blue")
+        plt.title('UMAP Visualization of Sample Embeddings')
+        plt.xlabel('UMAP Component 1')
+        plt.ylabel('UMAP Component 2')
+
+        plt.savefig(
+            f"../output/model_fig/vae_pair_umap_embeddings_samples_TUMOR_NORMAL_PDAC.svg", format="svg")
+
     def distance_analysis(self, feat_list):
         n_feats = len(feat_list)
         normal_embeds = self.decode_embedding.weight.data.cpu().detach().numpy()[:n_feats, :]
         tumor_embeds = self.decode_embedding.weight.data.cpu().detach().numpy()[n_feats:, :]
         embeds_diff = tumor_embeds - normal_embeds
-        distance = np.linalg.norm(embeds_diff,axis=1)
-        distance_data = {"Gene":feat_list, "Dist":distance}
+        distance = np.linalg.norm(embeds_diff, axis=1)
+        distance_data = {"Gene": feat_list, "Dist": distance}
         distance_df = pd.DataFrame(data=distance_data)
         distance_df.to_csv("../output/vae_pair_model/TUMOR_NORMAL_dist_7895_ah.csv")
         cos_sim = []
         for i in range(n_feats):
             sim = cosine_similarity([normal_embeds[i]], [tumor_embeds[i]])
-            cos_sim.append(sim[0,0])
+            cos_sim.append(sim[0, 0])
         cos_data = {"Gene": feat_list, "Cosine": cos_sim}
         cos_df = pd.DataFrame(data=cos_data)
         cos_df.to_csv("../output/vae_pair_model/TUMOR_NORMAL_cos_7895_ah.csv")
@@ -415,4 +533,3 @@ class VAEPairModel(nn.Module):
         tumor_embeds_df = pd.DataFrame(tumor_embeds, index=feat_list, columns=column_names)
         normal_embeds_df.to_csv("../output/vae_pair_model/normal_embeds_7895_ah.csv")
         tumor_embeds_df.to_csv("../output/vae_pair_model/tumor_embeds_7895_ah.csv")
-

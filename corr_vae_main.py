@@ -3,7 +3,7 @@ import argparse
 import pandas as pd
 
 from corr_vae_model import utils
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 import corr_vae
 import torch
 import sys
@@ -18,8 +18,8 @@ if __name__ == "__main__":
     parser.add_argument('--sample_dict', '-sd', type=str, default='../data/rna_tumor_sample_dict.csv')
     parser.add_argument('--output', '-o', type=str, help='the output folder', default='output')
     # ptm_input
-    parser.add_argument('--ph_input', '-pi', type=str, default='data/filtered_common_phospho_tumor_normal.csv')
-    parser.add_argument('--ac_input', '-ai', type=str, default='data/filtered_common_tumor_acel.csv')
+    parser.add_argument('--ph_input', '-pi', type=str, default='../data/filtered_common_phospho_tumor_normal.csv')
+    parser.add_argument('--ac_input', '-ai', type=str, default='../data/filtered_common_tumor_acel_df.csv')
     # model
     parser.add_argument('--use_ph', '-up', action='store_true', default=False)
     parser.add_argument('--use_ac', '-ua', action='store_true', default=False)
@@ -44,6 +44,7 @@ if __name__ == "__main__":
     parser.add_argument('--learn_linear', '-ll', action='store_true', default=False)
     parser.add_argument('--load_linear', '-lo', action='store_true', default=False)
     parser.add_argument('--ad_hoc', '-ah', action='store_true', default=False)
+    parser.add_argument('--unified_train', '-ut', action='store_true', default=False)
     # clustering
     parser.add_argument('--compare_cluster', '-cc', action='store_true', default=False)
     parser.add_argument('--num_clusters', '-nc', type=int, default=9)
@@ -52,12 +53,18 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     gene_dict = "../data/gene_dict.csv"
-    if args.model_class == 1:
-        print("Reading tumor data ...")
-        model_class = "TUMOR"
+
+    if not args.unified_train:
+        if args.model_class == 1:
+            print("Reading tumor data ...")
+            model_class = "TUMOR"
+        else:
+            print("Reading normal data ...")
+            model_class = "NORMAL"
     else:
-        print("Reading normal data ...")
-        model_class = "NORMAL"
+        print("Reading tumor and normal data ...")
+        model_class = "TUMOR AND NORMAL"
+
     # ptm_input
     if args.use_ph:
         ph_input = args.ph_input
@@ -77,7 +84,7 @@ if __name__ == "__main__":
         if args.ad_hoc:
             model_test_dataset = model_train_dataset
     else:
-        if model_class == 1:
+        if args.model_class == 1:
             test_class = "NORMAL"
         else:
             test_class = "TUMOR"
@@ -139,10 +146,35 @@ if __name__ == "__main__":
         load_model.to(args.device)
         # load_model.model_training(train_data, args.n_epoch, test_data, args.model_output)
         load_model.model_training(train_data, args.n_epoch, train_data, args.model_output)
-    result_path = f"../output/corr_vae_model/corr_vae_model_{model_class}_pred"
-    total_r2,pcc = load_model.model_test(test_data, result_path=result_path)
-    print("PCC is "+str(pcc))
-    print("Total R2 score: " + str(total_r2))
+    if not args.unified_train:
+        result_path = f"../output/corr_vae_model/corr_vae_model_{model_class}_pred"
+    else:
+        result_path = f"../output/corr_vae_model/corr_vae_model_TUMOR_NORMAL_pred"
+    if not args.unified_train:
+        total_r2, pcc = load_model.model_test(test_data, result_path=result_path)
+        print("PCC is " + str(pcc))
+        print("Total R2 score: " + str(total_r2))
+    else:
+        normal_test_indices = [idx for idx in model_test_dataset.indices
+                               if model_data[idx].sample_id.endswith('.N')]
+        tumor_test_indices = [idx for idx in model_test_dataset.indices
+                              if not model_data[idx].sample_id.endswith('.N')]
+        normal_test_data = Subset(model_data, normal_test_indices)
+        tumor_test_data = Subset(model_data, tumor_test_indices)
+        normal_test_dataset = DataLoader(normal_test_data, batch_size=args.batch_size, shuffle=True,
+                                         collate_fn=utils.collate_fn)
+        normal_result_path = result_path + "_normal_part"
+        normal_total_r2, normal_pcc = load_model.model_test(normal_test_dataset, result_path=normal_result_path)
+        print("PCC is " + str(normal_pcc))
+        print("Total R2 score: " + str(normal_total_r2))
+
+        tumor_test_dataset = DataLoader(tumor_test_data, batch_size=args.batch_size, shuffle=True,
+                                        collate_fn=utils.collate_fn)
+        tumor_result_path = result_path + "_tumor_part"
+        tumor_total_r2, tumor_pcc = load_model.model_test(tumor_test_dataset, result_path=tumor_result_path)
+        print("PCC is " + str(tumor_pcc))
+        print("Total R2 score: " + str(tumor_total_r2))
+
     if args.compare_cluster:
         if args.model_class == 1:
             compare_cluster = "../output/clusters/pair_vae_gene_clusters_9_NORMAL.csv"
@@ -153,4 +185,7 @@ if __name__ == "__main__":
     if args.visualize:
         load_model.visualize_emb(model_data.feat_list, args.model_class, method="UMAP",
                                  cluster_method=args.cluster_method, num_clusters=args.num_clusters)
-    torch.save(load_model, args.model_output + f"/tested_corr_vae_tumor_model_{model_class}.pt")
+    if not args.unified_train:
+        torch.save(load_model, args.model_output + f"/tested_corr_vae_tumor_model_{model_class}.pt")
+    else:
+        torch.save(load_model, args.model_output + f"/tested_corr_vae_tumor_model_TUMOR_NORMAL.pt")

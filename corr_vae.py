@@ -51,6 +51,10 @@ class CorrVAE(nn.Module):
             nn.Linear(n_phs, hidden_dim),
             nn.ReLU()
         )
+        self.mlp_ac_encoder = nn.Sequential(
+            nn.Linear(n_acs, hidden_dim),
+            nn.ReLU()
+        )
 
         # Embedding
         self.gene_embedding = nn.Embedding(n_feats, embedding_dim)
@@ -68,11 +72,29 @@ class CorrVAE(nn.Module):
 
     def encode(self, x, data_type, ph_x=None, ac_x=None):
         h1 = torch.relu(self.feat_fc(x))
-        if ph_x is not None:
+        if ph_x is not None and ac_x is None:
             ph_x = torch.unsqueeze(ph_x, 1)
             ph_h = self.mlp_ph_encoder(ph_x)
             ph_h = torch.squeeze(ph_h, 1)
             h1 = torch.cat((h1, ph_h), 1)
+            h1 = self.merge_hidden(h1)
+            h1 = torch.relu(h1)
+        if ph_x is None and ac_x is not None:
+            ac_x = torch.unsqueeze(ac_x, 1)
+            ac_h = self.mlp_ac_encoder(ac_x)
+            ac_h = torch.squeeze(ac_h, 1)
+            h1 = torch.cat((h1, ac_h), 1)
+            h1 = self.merge_hidden(h1)
+            h1 = torch.relu(h1)
+        if ph_x is not None and ac_x is not None:
+            ph_x = torch.unsqueeze(ph_x, 1)
+            ph_h = self.mlp_ph_encoder(ph_x)
+            ph_h = torch.squeeze(ph_h, 1)
+            h1 = torch.cat((h1, ph_h), 1)
+            ac_x = torch.unsqueeze(ac_x, 1)
+            ac_h = self.mlp_ac_encoder(ac_x)
+            ac_h = torch.squeeze(ac_h, 1)
+            h1 = torch.cat((h1, ac_h), 1)
             h1 = self.merge_hidden(h1)
             h1 = torch.relu(h1)
         emb_type = self.type_embedding(data_type)
@@ -204,6 +226,7 @@ class CorrVAE(nn.Module):
         for key, value in data_type_dict.items():
             id_2_type_dict[value] = key
         self.eval()
+        all_inputs = []
         all_preds = []
         all_targets = []
         all_types = []
@@ -236,8 +259,16 @@ class CorrVAE(nn.Module):
                 all_targets.append(targets[i])
                 all_preds.append(preds[i])
                 all_types.append(batch_data_type[i])
+                all_inputs.append(batch_input[i].cpu().detach().numpy())
+
         all_targets = np.hstack(all_targets)
         all_preds = np.hstack(all_preds)
+        all_inputs = np.hstack(all_inputs)
+
+        all_targets_array = all_targets.reshape(-1, n_feats)
+        all_preds_array = all_preds.reshape(-1, n_feats)
+        all_inputs_array = all_inputs.reshape(-1, n_feats)
+
         res_array = np.column_stack((all_targets, all_preds))
         res_df = pd.DataFrame(res_array, columns=['target', 'prediction'])
         res_df.to_csv(result_path + ".csv")
@@ -253,6 +284,21 @@ class CorrVAE(nn.Module):
         grouped_means_df.to_csv(result_path + "_diff.csv")
         total_r2 = r2_score(all_targets, all_preds)
         pcc = pearsonr(all_targets, all_preds)
+
+        # Result dataframes
+        all_targets_df = pd.DataFrame(all_targets_array)
+        all_preds_df = pd.DataFrame(all_preds_array)
+        all_inputs_df = pd.DataFrame(all_inputs_array)
+        all_targets_df.columns = data_loader.dataset.dataset.feat_list
+        all_preds_df.columns = data_loader.dataset.dataset.feat_list
+        all_inputs_df.columns = data_loader.dataset.dataset.feat_list
+        all_targets_df.index = all_type_names
+        all_preds_df.index = all_type_names
+        all_inputs_df.index = all_type_names
+        all_targets_df.to_csv(result_path + "_targets.csv")
+        all_preds_df.to_csv(result_path + "_preds.csv")
+        all_inputs_df.to_csv(result_path + "_inputs.csv")
+        
         return total_r2, pcc
 
     def visualize_emb(self, feat_list, model_class, method="tsne", cluster_method="kmeans", num_clusters=9):

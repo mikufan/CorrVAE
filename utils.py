@@ -215,11 +215,12 @@ def stratified_split(dataset, test_ratio, type_num, random_state=42):
 
 class OmicDataset(Dataset):
     def __init__(self, input_data, target_data, sample_dict, data_class, data_type_dict=None, feat_dict=None,
-                 ph_input=None, ac_input=None):
+                 ph_input=None, ac_input=None,common_type=False):
         self.data_items = []
         self.input_df = pd.read_csv(input_data, index_col=0)
         self.target_df = pd.read_csv(target_data, index_col=0)
         self.sample_type_dict = read_sample_dict(sample_dict, data_class)
+        self.common_type = common_type
         if data_type_dict is None:
             self.data_type_dict = dict()
         else:
@@ -298,6 +299,10 @@ class OmicDataset(Dataset):
                 ac_inputs = None
 
             data_type_id = self.data_type_dict[data_type]
+            common_type_list = [0, 1, 2, 3, 4, 5, 8, 9, 10, 14]
+            if self.common_type:
+                if data_type_id not in common_type_list:
+                    continue
             data_item = DataItem(s, inputs, target, data_type, data_type_id, ph_inputs=ph_inputs, ac_inputs=ac_inputs)
             self.data_items.append(data_item)
 
