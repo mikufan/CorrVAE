@@ -117,6 +117,8 @@ class VAEPairModel(nn.Module):
         z = z.to(self.device)
         if ph_x is not None:
             ph_x = ph_x.to(self.device)
+        if ac_x is not None:
+            ac_x = ac_x.to(self.device)
         data_type = data_type.to(self.device)
         emb_type = self.type_embedding(data_type)
         um_decode = True if \
@@ -189,6 +191,8 @@ class VAEPairModel(nn.Module):
             total_loss = 0.0
             train_ph_df = train_data.dataset.dataset.ph_df \
                 if isinstance(train_data.dataset, Subset) else train_data.dataset.ph_df
+            train_ac_df = train_data.dataset.dataset.ac_df \
+                if isinstance(train_data.dataset, Subset) else train_data.dataset.ac_df
             type_name_dict = train_data.dataset.dataset.type_name_dict \
                 if isinstance(train_data.dataset, Subset) else train_data.dataset.type_name_dict
             for data_batch in tqdm(train_data, mininterval=2, desc=' -Tot it %d' % n_batch,
@@ -199,19 +203,24 @@ class VAEPairModel(nn.Module):
                 batch_data_type = [d.data_type_id for d in data_batch]
                 batch_ph_input = [d.ph_inputs for d in data_batch] \
                     if train_ph_df is not None else None
+                batch_ac_input = [d.ac_inputs for d in data_batch] \
+                    if train_ac_df is not None else None
                 batch_input = torch.tensor(batch_input, dtype=torch.float32)
                 batch_target = torch.tensor(batch_target, dtype=torch.float32)
                 batch_data_type = torch.tensor(batch_data_type)
                 if batch_ph_input is not None:
                     batch_ph_input = torch.tensor(batch_ph_input, dtype=torch.float32)
-                batch_z = self.corr_vae_model.z_forward(batch_input, batch_data_type, ph_x=batch_ph_input)
+                if batch_ac_input is not None:
+                    batch_ac_input = torch.tensor(batch_ac_input, dtype=torch.float32)
+                batch_z = self.corr_vae_model.z_forward(batch_input, batch_data_type, ph_x=batch_ph_input,
+                                                        ac_x=batch_ac_input)
                 self.optimizer.zero_grad()
                 if decode_type == "y":
                     batch_loss = self.forward_y(batch_target, batch_z, batch_data_type, type_name_dict, batch_ph_input,
-                                                no_type=no_type)
+                                                batch_ac_input, no_type=no_type)
                 else:
                     batch_loss = self.forward(batch_input, batch_target, batch_z, batch_data_type, batch_ph_input,
-                                              no_type=no_type)
+                                              batch_ac_input, no_type=no_type)
                 batch_loss.backward()
                 self.optimizer.step()
                 total_loss += batch_loss
@@ -230,17 +239,21 @@ class VAEPairModel(nn.Module):
                 valid_batch_data_type = [d.data_type_id for d in valid_data_batch]
                 valid_batch_ph_input = [d.ph_inputs for d in valid_data_batch] \
                     if train_ph_df is not None else None
+                valid_batch_ac_input = [d.ac_inputs for d in valid_data_batch] \
+                    if train_ac_df is not None else None
                 valid_batch_input = torch.tensor(valid_batch_input, dtype=torch.float32)
                 valid_batch_target = torch.tensor(valid_batch_target, dtype=torch.float32)
                 valid_batch_data_type = torch.tensor(valid_batch_data_type)
                 if valid_batch_ph_input is not None:
                     valid_batch_ph_input = torch.tensor(valid_batch_ph_input, dtype=torch.float32)
+                if valid_batch_ac_input is not None:
+                    valid_batch_ac_input = torch.tensor(valid_batch_ac_input, dtype=torch.float32)
                 valid_batch_z = self.corr_vae_model.z_forward(valid_batch_input, valid_batch_data_type,
-                                                              ph_x=valid_batch_ph_input)
+                                                              ph_x=valid_batch_ph_input,ac_x=valid_batch_ac_input)
                 if decode_type == "y":
                     preds_y, targets_y = self.forward_y(valid_batch_target, valid_batch_z, valid_batch_data_type,
-                                                        type_name_dict, ph_x=valid_batch_ph_input, is_train=False,
-                                                        no_type=no_type)
+                                                        type_name_dict, ph_x=valid_batch_ph_input,
+                                                        ac_x=valid_batch_ac_input, is_train=False, no_type=no_type)
                     preds_y = preds_y.cpu().detach().numpy()
                     targets_y = targets_y.cpu().detach().numpy()
                     for i in range(batch_size):

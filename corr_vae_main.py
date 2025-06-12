@@ -19,7 +19,7 @@ if __name__ == "__main__":
     parser.add_argument('--output', '-o', type=str, help='the output folder', default='output')
     # ptm_input
     parser.add_argument('--ph_input', '-pi', type=str, default='../data/filtered_common_phospho_tumor_normal.csv')
-    parser.add_argument('--ac_input', '-ai', type=str, default='../data/filtered_common_tumor_acel_df.csv')
+    parser.add_argument('--ac_input', '-ai', type=str, default='../data/filtered_common_acel_tumor_normal.csv')
     # model
     parser.add_argument('--use_ph', '-up', action='store_true', default=False)
     parser.add_argument('--use_ac', '-ua', action='store_true', default=False)
@@ -63,7 +63,7 @@ if __name__ == "__main__":
             model_class = "NORMAL"
     else:
         print("Reading tumor and normal data ...")
-        model_class = "TUMOR AND NORMAL"
+        model_class = "TUMOR_AND_NORMAL"
 
     # ptm_input
     if args.use_ph:
@@ -78,10 +78,18 @@ if __name__ == "__main__":
     if not args.predict_from_normal:
         model_data = utils.OmicDataset(args.input, args.target, args.sample_dict, model_class, feat_dict=gene_dict,
                                        ph_input=ph_input, ac_input=ac_input)
-        model_train_dataset, model_test_dataset = utils.stratified_split(model_data, args.test_size,
-                                                                         len(model_data.data_type_dict),
-                                                                         random_state=42)
-        if args.ad_hoc:
+        if not args.ad_hoc:
+            # model_train_dataset, model_valid_test_dataset = utils.stratified_split(model_data, args.test_size,
+            #                                                                  len(model_data.data_type_dict),
+            #                                                                  random_state=42)
+            model_train_dataset, model_valid_dataset, model_test_dataset = utils.stratified_3_split(model_data,
+                                                                                                    1 - args.test_size,
+                                                                                                    0.5 * args.test_size,
+                                                                                                    len(model_data.data_type_dict),
+                                                                                                    random_state=42)
+        else:
+            model_train_dataset = model_data
+            model_valid_dataset = model_train_dataset
             model_test_dataset = model_train_dataset
     else:
         if args.model_class == 1:
@@ -91,6 +99,7 @@ if __name__ == "__main__":
         model_data = utils.OmicDataset(args.input, args.target, args.sample_dict, model_class, feat_dict=gene_dict,
                                        ph_input=ph_input, ac_input=args.ac_input)
         model_train_dataset, _ = utils.stratified_split(model_data, 0, len(model_data.data_type_dict), random_state=42)
+        model_valid_dataset, _ = utils.stratified_split(model_data, 0, len(model_data.data_type_dict), random_state=42)
         test_data = utils.OmicDataset(args.input, args.target, args.sample_dict, test_class, feat_dict=gene_dict,
                                       data_type_dict=model_data.data_type_dict, ph_input=ph_input, ac_input=ac_input)
         _, model_test_dataset = utils.stratified_split(test_data, 1, len(test_data.data_type_dict), random_state=42)
@@ -103,6 +112,8 @@ if __name__ == "__main__":
     if model_data.ac_df is not None:
         n_acs = len(model_data.ac_df)
     train_data = DataLoader(model_train_dataset, batch_size=args.batch_size, shuffle=True,
+                            collate_fn=utils.collate_fn)
+    valid_data = DataLoader(model_valid_dataset, batch_size=args.batch_size, shuffle=True,
                             collate_fn=utils.collate_fn)
     test_data = DataLoader(model_test_dataset, batch_size=args.batch_size, shuffle=True,
                            collate_fn=utils.collate_fn)
@@ -117,16 +128,62 @@ if __name__ == "__main__":
         else:
             linear_df = pd.read_csv(f"../output/corr_vae_model/corr_vae_model_{model_class}_linear.csv", index_col=0)
             bias_df = pd.read_csv(f"../output/corr_vae_model/corr_vae_model_{model_class}_bias.csv", index_col=0)
-        # linear_mse_df, r2, pcc = model_data.get_linear_mse(model_train_dataset.indices, linear_df, bias_df)
-        linear_mse_df, r2, pcc = model_data.get_linear_mse(model_test_dataset.indices, linear_df, bias_df)
-        linear_mse_df.to_csv(f"../output/corr_vae_model/corr_vae_model_{model_class}_linear_mse.csv")
-        print("Linear r2: " + str(r2))
-        print("Linear pcc: " + str(pcc))
-        # linear_corr_df, corr = model_data.get_linear_corr(model_test_dataset.indices, initial_linear_df,
-        #                                                   bias_df)
-        # linear_corr_df.to_csv(f"output/corr_ptm_vae_model/corr_ptm_vae_model_{model_class}_linear_corr.csv")
-        # print("Linear correlation: " + str(corr))
-        sys.exit()
+        if not args.unified_train:
+            valid_linear_mse_df, valid_r2, valid_pcc = model_data.get_linear_mse(model_valid_dataset.indices, linear_df,
+                                                                                 bias_df)
+            valid_linear_mse_df.to_csv(f"../output/corr_vae_model/corr_vae_model_{model_class}_valid_linear_mse.csv")
+            print("Linear valid r2: " + str(valid_r2))
+            print("Linear valid pcc: " + str(valid_pcc))
+            linear_mse_df, r2, pcc = model_data.get_linear_mse(model_test_dataset.indices, linear_df, bias_df)
+            linear_mse_df.to_csv(f"../output/corr_vae_model/corr_vae_model_{model_class}_linear_mse.csv")
+            print("Linear r2: " + str(r2))
+            print("Linear pcc: " + str(pcc))
+            sys.exit()
+        else:
+            normal_train_indices = [idx for idx in model_train_dataset.indices
+                                    if model_data[idx].sample_id.endswith('.N')]
+            tumor_train_indices = [idx for idx in model_train_dataset.indices
+                                   if not model_data[idx].sample_id.endswith('.N')]
+            model_data.linear_fit(tumor_train_indices, linear_df, bias_df, "tumor", "train")
+            model_data.linear_fit(normal_train_indices, linear_df, bias_df, "normal", "train")
+            normal_valid_indices = [idx for idx in model_valid_dataset.indices
+                                    if model_data[idx].sample_id.endswith('.N')]
+            tumor_valid_indices = [idx for idx in model_valid_dataset.indices
+                                   if not model_data[idx].sample_id.endswith('.N')]
+            # model_data.linear_fit
+            valid_normal_linear_mse_df, valid_normal_r2, valid_normal_pcc = model_data.get_linear_mse(
+                normal_valid_indices,
+                linear_df, bias_df)
+            valid_normal_linear_mse_df.to_csv(
+                f"../output/corr_vae_model/corr_vae_model_{model_class}_valid_linear_mse_normal.csv")
+            print("Linear valid normal r2: " + str(valid_normal_r2))
+            print("Linear valid normal pcc: " + str(valid_normal_pcc))
+            valid_tumor_linear_mse_df, valid_tumor_r2, valid_tumor_pcc = model_data.get_linear_mse(
+                tumor_valid_indices, linear_df, bias_df)
+            valid_tumor_linear_mse_df.to_csv(
+                f"../output/corr_vae_model/corr_vae_model_{model_class}_valid_linear_mse_tumor.csv")
+            print("Linear valid tumor r2: " + str(valid_tumor_r2))
+            print("Linear valid tumor pcc: " + str(valid_tumor_pcc))
+
+            normal_test_indices = [idx for idx in model_test_dataset.indices
+                                   if model_data[idx].sample_id.endswith('.N')]
+            tumor_test_indices = [idx for idx in model_test_dataset.indices
+                                  if not model_data[idx].sample_id.endswith('.N')]
+            test_normal_linear_mse_df, test_normal_r2, test_normal_pcc = model_data.get_linear_mse(
+                normal_test_indices,
+                linear_df, bias_df)
+            test_normal_linear_mse_df.to_csv(
+                f"../output/corr_vae_model/corr_vae_model_{model_class}_test_linear_mse_normal.csv")
+            print("Linear test normal r2: " + str(test_normal_r2))
+            print("Linear test normal pcc: " + str(test_normal_pcc))
+            test_tumor_linear_mse_df, test_tumor_r2, test_tumor_pcc = model_data.get_linear_mse(
+                tumor_test_indices, linear_df, bias_df)
+            test_tumor_linear_mse_df.to_csv(
+                f"../output/corr_vae_model/corr_vae_model_{model_class}_test_linear_mse_tumor.csv")
+            print("Linear test tumor r2: " + str(test_tumor_r2))
+            print("Linear test tumor pcc: " + str(test_tumor_pcc))
+            sys.exit()
+
     if not args.test_only:
         corr_vae_model = corr_vae.CorrVAE(hidden_dim=args.hidden_dim, latent_dim=args.latent_dim,
                                           embedding_dim=args.embedding_dim, n_feats=n_feats,
@@ -155,10 +212,74 @@ if __name__ == "__main__":
         print("PCC is " + str(pcc))
         print("Total R2 score: " + str(total_r2))
     else:
-        normal_test_indices = [idx for idx in model_test_dataset.indices
-                               if model_data[idx].sample_id.endswith('.N')]
-        tumor_test_indices = [idx for idx in model_test_dataset.indices
-                              if not model_data[idx].sample_id.endswith('.N')]
+        if isinstance(model_train_dataset, Subset):
+            normal_train_indices = [idx for idx in model_train_dataset.indices
+                                    if model_data[idx].sample_id.endswith('.N')]
+            tumor_train_indices = [idx for idx in model_train_dataset.indices
+                                   if not model_data[idx].sample_id.endswith('.N')]
+        else:
+            normal_train_indices = [idx for idx in range(len(model_train_dataset))
+                                    if model_data[idx].sample_id.endswith('.N')]
+            tumor_train_indices = [idx for idx in range(len(model_train_dataset))
+                                   if not model_data[idx].sample_id.endswith('.N')]
+        normal_train_data = Subset(model_data, normal_train_indices)
+        tumor_train_data = Subset(model_data, tumor_train_indices)
+        normal_train_dataset = DataLoader(normal_train_data, batch_size=args.batch_size, shuffle=True,
+                                          collate_fn=utils.collate_fn)
+        normal_train_result_path = result_path + "_train_normal_part"
+        normal_train_total_r2, normal_train_pcc = load_model.model_test(normal_train_dataset,
+                                                                        result_path=normal_train_result_path)
+        print("train PCC is " + str(normal_train_pcc))
+        print("Total train R2 score: " + str(normal_train_total_r2))
+
+        tumor_train_dataset = DataLoader(tumor_train_data, batch_size=args.batch_size, shuffle=True,
+                                         collate_fn=utils.collate_fn)
+        tumor_train_result_path = result_path + "_train_tumor_part"
+        tumor_train_total_r2, tumor_train_pcc = load_model.model_test(tumor_train_dataset,
+                                                                      result_path=tumor_train_result_path)
+        print("train PCC is " + str(tumor_train_pcc))
+        print("Total train R2 score: " + str(tumor_train_total_r2))
+
+        if isinstance(model_valid_dataset, Subset):
+            normal_valid_indices = [idx for idx in model_valid_dataset.indices
+                                    if model_data[idx].sample_id.endswith('.N')]
+            tumor_valid_indices = [idx for idx in model_valid_dataset.indices
+                                   if not model_data[idx].sample_id.endswith('.N')]
+        else:
+            normal_valid_indices = [idx for idx in range(len(model_valid_dataset))
+                                    if model_data[idx].sample_id.endswith('.N')]
+            tumor_valid_indices = [idx for idx in range(len(model_valid_dataset))
+                                   if not model_data[idx].sample_id.endswith('.N')]
+        normal_valid_data = Subset(model_data, normal_valid_indices)
+        tumor_valid_data = Subset(model_data, tumor_valid_indices)
+        normal_valid_dataset = DataLoader(normal_valid_data, batch_size=args.batch_size, shuffle=True,
+                                          collate_fn=utils.collate_fn)
+        normal_valid_result_path = result_path + "_valid_normal_part"
+        normal_valid_total_r2, normal_valid_pcc = load_model.model_test(normal_valid_dataset,
+                                                                        result_path=normal_valid_result_path)
+        print("Valid PCC is " + str(normal_valid_pcc))
+        print("Total valid R2 score: " + str(normal_valid_total_r2))
+
+        tumor_valid_dataset = DataLoader(tumor_valid_data, batch_size=args.batch_size, shuffle=True,
+                                         collate_fn=utils.collate_fn)
+        tumor_valid_result_path = result_path + "_valid_tumor_part"
+        tumor_valid_total_r2, tumor_valid_pcc = load_model.model_test(tumor_valid_dataset,
+                                                                      result_path=tumor_valid_result_path)
+        print("Valid PCC is " + str(tumor_valid_pcc))
+        print("Total valid R2 score: " + str(tumor_valid_total_r2))
+
+        if isinstance(model_test_dataset, Subset):
+            normal_test_indices = [idx for idx in model_test_dataset.indices
+                                   if model_data[idx].sample_id.endswith('.N')]
+            tumor_test_indices = [idx for idx in model_test_dataset.indices
+                                  if not model_data[idx].sample_id.endswith('.N')]
+
+        else:
+            normal_test_indices = [idx for idx in range(len(model_test_dataset))
+                                   if model_data[idx].sample_id.endswith('.N')]
+            tumor_test_indices = [idx for idx in range(len(model_test_dataset))
+                                  if not model_data[idx].sample_id.endswith('.N')]
+
         normal_test_data = Subset(model_data, normal_test_indices)
         tumor_test_data = Subset(model_data, tumor_test_indices)
         normal_test_dataset = DataLoader(normal_test_data, batch_size=args.batch_size, shuffle=True,

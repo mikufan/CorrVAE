@@ -141,7 +141,7 @@ def calculate_mse(input, target, slope, bias, threshold=1e-4):
 
 
 class DataItem(object):
-    def __init__(self, sample_id, input_feat, target_feat, data_type, data_type_id, ph_inputs=None,ac_inputs=None):
+    def __init__(self, sample_id, input_feat, target_feat, data_type, data_type_id, ph_inputs=None, ac_inputs=None):
         self.sample_id = sample_id
         self.feat_list = input_feat.index
         self.input_feat = input_feat.values
@@ -161,7 +161,7 @@ def read_sample_dict(sample_dict, data_class):
     sample_dict_df = pd.read_csv(sample_dict, index_col=0)
     sample_type_dict = {}
     for sample_type in sample_dict_df.index:
-        if data_class != "TUMOR AND NORMAL":
+        if data_class != "TUMOR_AND_NORMAL":
             if sample_type.split("_")[1] != data_class:
                 continue
             sample_list = sample_dict_df.loc[sample_type, :].dropna()
@@ -213,9 +213,48 @@ def stratified_split(dataset, test_ratio, type_num, random_state=42):
     return train_dataset, test_dataset
 
 
+def stratified_3_split(dataset, train_ratio=0.8, val_ratio=0.1, type_num=None, random_state=42):
+    np.random.seed(random_state)
+
+    dataset_size = len(dataset)
+    labels = [dataset[i].data_type_id for i in range(dataset_size)]
+
+    # 创建类别对应的索引字典
+    if type_num is None:
+        type_num = len(set(labels))
+    indices_per_class = {i: [] for i in range(type_num)}
+    for idx, label in enumerate(labels):
+        indices_per_class[label].append(idx)
+
+    train_indices = []
+    val_indices = []
+    test_indices = []
+
+    for class_indices in indices_per_class.values():
+        np.random.shuffle(class_indices)
+        n_total = len(class_indices)
+        n_train = int(n_total * train_ratio)
+        n_val = int(n_total * val_ratio)
+        n_test = n_total - n_train - n_val
+
+        train_indices.extend(class_indices[:n_train])
+        val_indices.extend(class_indices[n_train:n_train + n_val])
+        test_indices.extend(class_indices[n_train + n_val:])
+
+    np.random.shuffle(train_indices)
+    np.random.shuffle(val_indices)
+    np.random.shuffle(test_indices)
+
+    train_dataset = Subset(dataset, train_indices)
+    val_dataset = Subset(dataset, val_indices)
+    test_dataset = Subset(dataset, test_indices)
+
+    return train_dataset, val_dataset, test_dataset
+
+
 class OmicDataset(Dataset):
     def __init__(self, input_data, target_data, sample_dict, data_class, data_type_dict=None, feat_dict=None,
-                 ph_input=None, ac_input=None,common_type=False):
+                 ph_input=None, ac_input=None, common_type=False):
         self.data_items = []
         self.input_df = pd.read_csv(input_data, index_col=0)
         self.target_df = pd.read_csv(target_data, index_col=0)
@@ -233,12 +272,16 @@ class OmicDataset(Dataset):
         if ph_input is not None:
             self.ph_df = pd.read_csv(ph_input, index_col=0)
             self.ph_df.replace([np.inf, -np.inf], 1e-5, inplace=True)
+            self.ph_feat_list = self.get_ph_feat_list(feat_dict)
         else:
             self.ph_df = None
+            self.ph_feat_list = []
         if ac_input is not None:
             self.ac_df = pd.read_csv(ac_input, index_col=0)
+            self.ac_feat_list = self.get_ac_feat_list()
         else:
             self.ac_df = None
+            self.ac_feat_list = []
         self.read_data(data_class)
         self.type_name_dict = {v: k for k, v in self.data_type_dict.items()}
 
@@ -259,8 +302,27 @@ class OmicDataset(Dataset):
             feat_list.append(feat_name)
         return feat_list
 
+    def get_ph_feat_list(self, feat_dict):
+        feat_list = []
+        feat_df = pd.read_csv(feat_dict, index_col=0)
+        for feat_idx in self.ph_df.index:
+            gene_idx, ph_idx, site, pep, num = feat_idx.split("|")
+            if gene_idx in feat_df['gene_id'].values:
+                gene_name = feat_df[feat_df['gene_id'] == gene_idx]['gene_name'].values[0]
+            else:
+                gene_name = gene_idx
+            feat_name = gene_name+"_"+site+"_"+pep
+            feat_list.append(feat_name)
+        return feat_list
+
+    def get_ac_feat_list(self):
+        feat_list = []
+        for feat_idx in self.ac_df.index:
+            feat_list.append(feat_idx)
+        return feat_list
+
     def read_data(self, data_class):
-        if data_class != "TUMOR AND NORMAL":
+        if data_class != "TUMOR_AND_NORMAL":
             if data_class == "NORMAL":
                 input_samples = [col for col in self.input_df.columns if col.endswith('.N')]
             else:
@@ -350,3 +412,10 @@ class OmicDataset(Dataset):
         t_target_df["type"] = sample_type_list
         mse_df, r2, pcc = calculate_mse(t_input_df, t_target_df, slope_df, bias_df)
         return mse_df, r2, pcc
+
+    def linear_fit(self, indices, slope_df, bias_df, model_class, data_set):
+        linear_mse_df, r2, pcc = self.get_linear_mse(indices, slope_df, bias_df)
+        linear_mse_df.to_csv(
+            f"../output/corr_vae_model/corr_vae_model_TUMOR_AND_NORMAL_{data_set}_linear_mse_{model_class}.csv")
+        print(f"Linear {data_set} {model_class} r2: " + str(r2))
+        print(f"Linear {data_set} {model_class} pcc: " + str(pcc))

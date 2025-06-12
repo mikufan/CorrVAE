@@ -14,7 +14,7 @@ if __name__ == "__main__":
                         help='the target file')
     # ptm input
     parser.add_argument('--ph_input', '-pi', type=str, default='../data/filtered_common_phospho_tumor_normal.csv')
-    parser.add_argument('--ac_input', '-ai', type=str, default='../data/filtered_common_tumor_acel.csv')
+    parser.add_argument('--ac_input', '-ai', type=str, default='../data/filtered_common_acel_tumor_normal.csv')
 
     parser.add_argument('--sample_dict', '-sd', type=str, default='../data/rna_tumor_sample_dict.csv')
     parser.add_argument('--output', '-o', type=str, help='the output folder', default='output')
@@ -122,10 +122,12 @@ if __name__ == "__main__":
             if not args.test_only:
                 pair_normal_model = corr_vae_pair_model.VAEPairModel(load_model, args.hidden_dim, args.latent_dim,
                                                                      args.embedding_dim,
-                                                                     n_feats, args.type_embedding_dim, args.device)
+                                                                     n_feats, args.type_embedding_dim, args.device,
+                                                                     n_ptms=n_phs, n_acs=n_acs)
                 pair_tumor_model = corr_vae_pair_model.VAEPairModel(load_model, args.hidden_dim, args.latent_dim,
                                                                     args.embedding_dim,
-                                                                    n_feats, args.type_embedding_dim, args.device)
+                                                                    n_feats, args.type_embedding_dim, args.device,
+                                                                    n_ptms=n_phs, n_acs=n_acs)
                 pair_normal_model.to(device)
                 pair_normal_model.pair_model_training(batch_normal_data, args.n_epoch, args.model_output,
                                                       args.no_type, decode_type="y")
