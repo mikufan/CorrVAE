@@ -41,6 +41,7 @@ if __name__ == "__main__":
     parser.add_argument('--continue_train', '-ct', action='store_true', default=False)
     parser.add_argument('--ad_hoc', '-ah', action='store_true', default=False)
     parser.add_argument('--unified_train', '-ut', action='store_true', default=False)
+    parser.add_argument('--ood_test','-ot', action='store_true',default=False)
 
     args = parser.parse_args()
     gene_dict = "../data/gene_dict.csv"

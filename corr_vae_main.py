@@ -34,6 +34,11 @@ if __name__ == "__main__":
     parser.add_argument('--n_epoch', '-ne', type=int, help='the number of training epochs', default=400)
     parser.add_argument('--model_output', '-mo', type=str, default='../output/model')
     parser.add_argument('--n_layer', type=int, help='the number of encoder layers', default=3)
+    parser.add_argument('--transformer_encoder', '-te', action='store_true', default=False)
+    parser.add_argument('--linformer_encoder', '-le', action='store_true', default=False)
+    parser.add_argument('--contrastive_loss', '-cl', action='store_true', default=False)
+    parser.add_argument('--alpha', type=float, default=0.5)
+    parser.add_argument('--custom_linformer', '-cle', action='store_true', default=False)
     # config
     parser.add_argument('--test_only', action='store_true', help='only do test with trained models', default=False)
     parser.add_argument('--test_size', type=float, default=0.25)
@@ -45,6 +50,13 @@ if __name__ == "__main__":
     parser.add_argument('--load_linear', '-lo', action='store_true', default=False)
     parser.add_argument('--ad_hoc', '-ah', action='store_true', default=False)
     parser.add_argument('--unified_train', '-ut', action='store_true', default=False)
+    parser.add_argument('--no_type', '-nt', action='store_true', default=False)
+
+    parser.add_argument('--ood_test', '-ot', action='store_true', default=False)
+    parser.add_argument('--ood_test_path', '-oot', type=str, default='../data/brain_cptac_protein.csv')
+    parser.add_argument('--ood_input_path', '-ooi', type=str, default="../data/brian_cptac_data_mrna_seq_v2_rsem.txt")
+    parser.add_argument('--ood_ph_input_path', '-oop', type=str,
+                        default="../data/data_phosphoprotein_quantification.txt")
     # clustering
     parser.add_argument('--compare_cluster', '-cc', action='store_true', default=False)
     parser.add_argument('--num_clusters', '-nc', type=int, default=9)
@@ -188,21 +200,29 @@ if __name__ == "__main__":
         corr_vae_model = corr_vae.CorrVAE(hidden_dim=args.hidden_dim, latent_dim=args.latent_dim,
                                           embedding_dim=args.embedding_dim, n_feats=n_feats,
                                           type_embedding_dim=args.type_embedding_dim, n_types=n_types,
-                                          n_phs=n_phs, n_acs=n_acs, device=args.device)
+                                          n_phs=n_phs, n_acs=n_acs, device=args.device, no_types=args.no_type,
+                                          trans_encoder=args.transformer_encoder, lin_encoder=args.linformer_encoder,
+                                          con_loss=args.contrastive_loss, alpha=args.alpha,
+                                          cus_line=args.custom_linformer)
         if args.device != "cpu":
             device = torch.device(args.device if torch.cuda.is_available() else "cpu")
         corr_vae_model.to(corr_vae_model.device)
-        # corr_vae_model.model_training(train_data, args.n_epoch, test_data, args.model_output)
-        corr_vae_model.model_training(train_data, args.n_epoch, train_data, args.model_output)
+        corr_vae_model.model_training(train_data, args.n_epoch, valid_data, args.model_output)
+        # corr_vae_model.model_training(train_data, args.n_epoch, train_data, args.model_output)
     print('Loading trained model')
     load_model_name = args.load_model_path
+    if not args.no_type:
+        load_model_name = args.load_model_path
+    else:
+        load_model_name = args.load_model_path
+        load_model_name = load_model_name.split(".")[0] + "_no_type.pt"
     load_model = torch.load(args.model_output + "/" + load_model_name)
     if args.continue_train:
         if args.device != "cpu":
             device = torch.device(args.device if torch.cuda.is_available() else "cpu")
         load_model.to(args.device)
-        # load_model.model_training(train_data, args.n_epoch, test_data, args.model_output)
-        load_model.model_training(train_data, args.n_epoch, train_data, args.model_output)
+        load_model.model_training(train_data, args.n_epoch, valid_data, args.model_output)
+        # load_model.model_training(train_data, args.n_epoch, train_data, args.model_output)
     if not args.unified_train:
         result_path = f"../output/corr_vae_model/corr_vae_model_{model_class}_pred"
     else:
@@ -227,17 +247,19 @@ if __name__ == "__main__":
         normal_train_dataset = DataLoader(normal_train_data, batch_size=args.batch_size, shuffle=True,
                                           collate_fn=utils.collate_fn)
         normal_train_result_path = result_path + "_train_normal_part"
-        normal_train_total_r2, normal_train_pcc = load_model.model_test(normal_train_dataset,
-                                                                        result_path=normal_train_result_path)
-        print("train PCC is " + str(normal_train_pcc))
+        normal_train_total_r2, normal_train_pcc, normal_train_scc = load_model.model_test(normal_train_dataset,
+                                                                                          result_path=normal_train_result_path)
+        print("Normal train PCC is " + str(normal_train_pcc))
+        print("Normal train SCC is " + str(normal_train_scc))
         print("Total train R2 score: " + str(normal_train_total_r2))
 
         tumor_train_dataset = DataLoader(tumor_train_data, batch_size=args.batch_size, shuffle=True,
                                          collate_fn=utils.collate_fn)
         tumor_train_result_path = result_path + "_train_tumor_part"
-        tumor_train_total_r2, tumor_train_pcc = load_model.model_test(tumor_train_dataset,
-                                                                      result_path=tumor_train_result_path)
-        print("train PCC is " + str(tumor_train_pcc))
+        tumor_train_total_r2, tumor_train_pcc, tumor_train_scc = load_model.model_test(tumor_train_dataset,
+                                                                                       result_path=tumor_train_result_path)
+        print("Tumor train PCC is " + str(tumor_train_pcc))
+        print("Tumor train SCC is " + str(tumor_train_scc))
         print("Total train R2 score: " + str(tumor_train_total_r2))
 
         if isinstance(model_valid_dataset, Subset):
@@ -255,17 +277,19 @@ if __name__ == "__main__":
         normal_valid_dataset = DataLoader(normal_valid_data, batch_size=args.batch_size, shuffle=True,
                                           collate_fn=utils.collate_fn)
         normal_valid_result_path = result_path + "_valid_normal_part"
-        normal_valid_total_r2, normal_valid_pcc = load_model.model_test(normal_valid_dataset,
+        normal_valid_total_r2, normal_valid_pcc,normal_valid_scc = load_model.model_test(normal_valid_dataset,
                                                                         result_path=normal_valid_result_path)
-        print("Valid PCC is " + str(normal_valid_pcc))
+        print("Normal valid PCC is " + str(normal_valid_pcc))
+        print("Normal valid SCC is " + str(normal_valid_scc))
         print("Total valid R2 score: " + str(normal_valid_total_r2))
 
         tumor_valid_dataset = DataLoader(tumor_valid_data, batch_size=args.batch_size, shuffle=True,
                                          collate_fn=utils.collate_fn)
         tumor_valid_result_path = result_path + "_valid_tumor_part"
-        tumor_valid_total_r2, tumor_valid_pcc = load_model.model_test(tumor_valid_dataset,
-                                                                      result_path=tumor_valid_result_path)
-        print("Valid PCC is " + str(tumor_valid_pcc))
+        tumor_valid_total_r2, tumor_valid_pcc, tumor_valid_scc = load_model.model_test(tumor_valid_dataset,
+                                                                                       result_path=tumor_valid_result_path)
+        print("Tumor Valid PCC is " + str(tumor_valid_pcc))
+        print("Tumor Valid SCC is " + str(tumor_valid_scc))
         print("Total valid R2 score: " + str(tumor_valid_total_r2))
 
         if isinstance(model_test_dataset, Subset):
@@ -285,15 +309,18 @@ if __name__ == "__main__":
         normal_test_dataset = DataLoader(normal_test_data, batch_size=args.batch_size, shuffle=True,
                                          collate_fn=utils.collate_fn)
         normal_result_path = result_path + "_normal_part"
-        normal_total_r2, normal_pcc = load_model.model_test(normal_test_dataset, result_path=normal_result_path)
-        print("PCC is " + str(normal_pcc))
+        normal_total_r2, normal_pcc, normal_scc = load_model.model_test(normal_test_dataset,
+                                                                        result_path=normal_result_path)
+        print("Normal PCC is " + str(normal_pcc))
+        print("Normal SCC is " + str(normal_scc))
         print("Total R2 score: " + str(normal_total_r2))
 
         tumor_test_dataset = DataLoader(tumor_test_data, batch_size=args.batch_size, shuffle=True,
                                         collate_fn=utils.collate_fn)
         tumor_result_path = result_path + "_tumor_part"
-        tumor_total_r2, tumor_pcc = load_model.model_test(tumor_test_dataset, result_path=tumor_result_path)
-        print("PCC is " + str(tumor_pcc))
+        tumor_total_r2, tumor_pcc, tumor_scc = load_model.model_test(tumor_test_dataset, result_path=tumor_result_path)
+        print("Tumor PCC is " + str(tumor_pcc))
+        print("Tumor SCC is " + str(tumor_scc))
         print("Total R2 score: " + str(tumor_total_r2))
 
     if args.compare_cluster:
@@ -310,3 +337,17 @@ if __name__ == "__main__":
         torch.save(load_model, args.model_output + f"/tested_corr_vae_tumor_model_{model_class}.pt")
     else:
         torch.save(load_model, args.model_output + f"/tested_corr_vae_tumor_model_TUMOR_NORMAL.pt")
+    if args.ood_test:
+        if not args.use_ph:
+            ood_ph_input = None
+        else:
+            ood_ph_input = args.ood_ph_input_path
+        ood_test_data = utils.OmicDataset(args.ood_input_path, args.ood_test_path, None, "TUMOR", feat_dict=gene_dict,
+                                          ph_input=ood_ph_input, ac_input=None, common_feat=model_data.feat_list,
+                                          ood_data=True, common_ph_feat=model_data.ph_feat_list)
+        ood_test_dataset = DataLoader(ood_test_data, batch_size=args.batch_size, shuffle=True,
+                                      collate_fn=utils.collate_fn)
+        ood_result_path = result_path + "_ood_test"
+        tumor_total_r2, tumor_pcc = load_model.model_ood_test(ood_test_dataset, result_path=ood_result_path)
+        print("PCC is " + str(tumor_pcc))
+        print("Total R2 score: " + str(tumor_total_r2))

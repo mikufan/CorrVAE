@@ -7,7 +7,7 @@ from tqdm import tqdm
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
 import sys
-from scipy.stats import pearsonr
+from scipy.stats import pearsonr,spearmanr
 
 
 def get_logger(filename, verbosity=1, name=None):
@@ -137,6 +137,7 @@ def calculate_mse(input, target, slope, bias, threshold=1e-4):
     # 计算R²
     r2 = r2_score(y_true, y_pred)
     pcc, pv = pearsonr(y_true, y_pred)
+
     return result, r2, pcc
 
 
@@ -254,11 +255,17 @@ def stratified_3_split(dataset, train_ratio=0.8, val_ratio=0.1, type_num=None, r
 
 class OmicDataset(Dataset):
     def __init__(self, input_data, target_data, sample_dict, data_class, data_type_dict=None, feat_dict=None,
-                 ph_input=None, ac_input=None, common_type=False):
+                 ph_input=None, ac_input=None, common_type=False,common_feat=None,ood_data=False,common_ph_feat=None):
         self.data_items = []
-        self.input_df = pd.read_csv(input_data, index_col=0)
+        if not ood_data:
+            self.input_df = pd.read_csv(input_data, index_col=0)
+        else:
+            self.input_df = pd.read_csv(input_data, index_col=0, sep="\t") + 7
         self.target_df = pd.read_csv(target_data, index_col=0)
-        self.sample_type_dict = read_sample_dict(sample_dict, data_class)
+        if sample_dict is not None:
+            self.sample_type_dict = read_sample_dict(sample_dict, data_class)
+        else:
+            self.sample_type_dict = None
         self.common_type = common_type
         if data_type_dict is None:
             self.data_type_dict = dict()
@@ -267,12 +274,19 @@ class OmicDataset(Dataset):
         if feat_dict is None:
             self.feat_list = []
         else:
-            self.feat_list = self.get_feat_list(feat_dict)
+            if common_feat is None:
+                self.feat_list = self.get_feat_list(feat_dict)
+            else:
+                self.feat_list = common_feat
 
         if ph_input is not None:
-            self.ph_df = pd.read_csv(ph_input, index_col=0)
-            self.ph_df.replace([np.inf, -np.inf], 1e-5, inplace=True)
-            self.ph_feat_list = self.get_ph_feat_list(feat_dict)
+            if not ood_data:
+                self.ph_df = pd.read_csv(ph_input, index_col=0)
+                self.ph_df.replace([np.inf, -np.inf], 1e-5, inplace=True)
+                self.ph_feat_list = self.get_ph_feat_list(feat_dict)
+            else:
+                self.ph_df = pd.read_csv(ph_input, index_col=0, sep='\t')
+                self.ph_feat_list = common_ph_feat
         else:
             self.ph_df = None
             self.ph_feat_list = []
@@ -282,8 +296,13 @@ class OmicDataset(Dataset):
         else:
             self.ac_df = None
             self.ac_feat_list = []
-        self.read_data(data_class)
-        self.type_name_dict = {v: k for k, v in self.data_type_dict.items()}
+        if self.sample_type_dict is not None:
+
+            self.read_data(data_class)
+            self.type_name_dict = {v: k for k, v in self.data_type_dict.items()}
+        else:
+            self.read_ood_data(data_class)
+            self.type_name_dict = None
 
     def __len__(self):
         return len(self.data_items)
@@ -311,7 +330,7 @@ class OmicDataset(Dataset):
                 gene_name = feat_df[feat_df['gene_id'] == gene_idx]['gene_name'].values[0]
             else:
                 gene_name = gene_idx
-            feat_name = gene_name+"_"+site+"_"+pep
+            feat_name = gene_name + "_" + site + "_" + pep
             feat_list.append(feat_name)
         return feat_list
 
@@ -355,7 +374,7 @@ class OmicDataset(Dataset):
 
             if self.ac_df is not None and s in self.ac_df.columns:
                 ac_inputs = self.ac_df[s]
-            elif self.ph_df is not None:
+            elif self.ac_df is not None:
                 ac_inputs = np.zeros(len(self.ac_df))
             else:
                 ac_inputs = None
@@ -365,6 +384,78 @@ class OmicDataset(Dataset):
             if self.common_type:
                 if data_type_id not in common_type_list:
                     continue
+            data_item = DataItem(s, inputs, target, data_type, data_type_id, ph_inputs=ph_inputs, ac_inputs=ac_inputs)
+            self.data_items.append(data_item)
+
+    def read_ood_data(self, data_class):
+        input_samples = [col for col in self.input_df.columns]
+        target_samples = [col for col in self.target_df.columns]
+        common_input_samples = [s for s in input_samples if s in target_samples]
+        if self.ph_df is not None:
+            common_input_samples = [s for s in common_input_samples if s in self.ph_df.columns]
+
+        intersect_feat = []
+        intersect_ph_feat = []
+        intersect_ph = []
+        self.target_df.index = self.target_df.index.str.split('|').str[0]
+        for feat in self.feat_list:
+            if feat in self.input_df.index.values and feat in self.target_df.index.values:
+                intersect_feat.append(feat)
+        if self.ph_df is not None:
+            common_ph_feat_list = []
+            self.ph_df = self.ph_df.iloc[:, 2:]
+            for ph in self.ph_feat_list:
+                common_ph_feat_list.append(ph.split("_")[0]+"_"+ph.split("_")[1])
+            common_ph_feat_list = np.array(common_ph_feat_list)
+            common_ph_feat_list = np.unique(common_ph_feat_list)
+            data_ph_list = []
+            for ph in self.ph_df.index.values:
+                ph_feat = ph.split("_")[0]+"_"+ph.split("_")[-1]
+                data_ph_list.append(ph_feat)
+            self.ph_df.index = data_ph_list
+            self.ph_df = self.ph_df[~self.ph_df.index.duplicated(keep='first')]
+            for ph in self.ph_feat_list:
+                ph_feat = ph.split("_")[0] + "_" + ph.split("_")[1]
+                if ph_feat in data_ph_list:
+                    intersect_ph_feat.append(ph_feat)
+                    intersect_ph.append(ph)
+            # for feat in
+        input_sub = self.input_df.loc[intersect_feat, input_samples]
+        target_sub = self.target_df.loc[intersect_feat, input_samples]
+        input_sub = input_sub[~input_sub.index.duplicated(keep='first')]
+        target_sub = target_sub[~target_sub.index.duplicated(keep='first')]
+        input_sub = input_sub.reindex(index=self.feat_list, fill_value=1e-6)
+        target_sub = target_sub.reindex(index=self.feat_list, fill_value=1e-6)
+        ph_input_s = pd.DataFrame(np.full((len(self.ph_feat_list), len(common_input_samples)), 1e-6))
+        if self.ph_df is not None:
+            ph_input_sub = self.ph_df.loc[intersect_ph_feat, common_input_samples]
+            ph_input_sub.index = intersect_ph
+            ph_input_sub = ph_input_sub+20
+            positions = [self.ph_feat_list.index(x) for x in intersect_ph if x in self.ph_feat_list]
+            ph_input_s.index = self.ph_feat_list
+            ph_input_s.columns = common_input_samples
+            ph_input_s.iloc[positions] = ph_input_sub
+        # for s in input_samples:
+        for s in tqdm(input_samples, mininterval=2, desc=' -Tot it %d' % len(input_samples),
+                        leave=True, file=sys.stdout):
+            inputs = input_sub[s]
+            target = target_sub[s]
+            data_type = "UNKNOWN"
+            data_type_id = -1
+            # ph_input
+            if self.ph_df is not None and s in common_input_samples:
+                ph_inputs = ph_input_s[s]
+            elif self.ph_df is not None:
+                ph_inputs = np.zeros(len(self.ph_feat_list))
+            else:
+                ph_inputs = None
+
+            if self.ac_df is not None and s in self.ac_df.columns:
+                ac_inputs = self.ac_df[s]
+            elif self.ac_df is not None:
+                ac_inputs = np.zeros(len(self.ac_df))
+            else:
+                ac_inputs = None
             data_item = DataItem(s, inputs, target, data_type, data_type_id, ph_inputs=ph_inputs, ac_inputs=ac_inputs)
             self.data_items.append(data_item)
 
