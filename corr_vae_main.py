@@ -39,6 +39,7 @@ if __name__ == "__main__":
     parser.add_argument('--contrastive_loss', '-cl', action='store_true', default=False)
     parser.add_argument('--alpha', type=float, default=0.5)
     parser.add_argument('--custom_linformer', '-cle', action='store_true', default=False)
+    # parser.add_argument('--attn_output','-ao',type=str, default='../output/corr_vae_model/attn_map.csv')
     # config
     parser.add_argument('--test_only', action='store_true', help='only do test with trained models', default=False)
     parser.add_argument('--test_size', type=float, default=0.25)

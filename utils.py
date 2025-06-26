@@ -7,7 +7,7 @@ from tqdm import tqdm
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
 import sys
-from scipy.stats import pearsonr,spearmanr
+from scipy.stats import pearsonr, spearmanr
 
 
 def get_logger(filename, verbosity=1, name=None):
@@ -141,6 +141,21 @@ def calculate_mse(input, target, slope, bias, threshold=1e-4):
     return result, r2, pcc
 
 
+def get_tumor_normal_index(type_dict, type_list):
+    type_name = []
+    tumor_index = []
+    normal_index = []
+    for t in type_list:
+        type_name.append(type_dict.get(t))
+    for i,n in enumerate(type_name):
+        if n.split("_")[1] == "TUMOR":
+            tumor_index.append(i)
+        if n.split("_")[1] == "NORMAL":
+            normal_index.append(i)
+    return tumor_index, normal_index
+
+
+
 class DataItem(object):
     def __init__(self, sample_id, input_feat, target_feat, data_type, data_type_id, ph_inputs=None, ac_inputs=None):
         self.sample_id = sample_id
@@ -255,7 +270,8 @@ def stratified_3_split(dataset, train_ratio=0.8, val_ratio=0.1, type_num=None, r
 
 class OmicDataset(Dataset):
     def __init__(self, input_data, target_data, sample_dict, data_class, data_type_dict=None, feat_dict=None,
-                 ph_input=None, ac_input=None, common_type=False,common_feat=None,ood_data=False,common_ph_feat=None):
+                 ph_input=None, ac_input=None, common_type=False, common_feat=None, ood_data=False,
+                 common_ph_feat=None):
         self.data_items = []
         if not ood_data:
             self.input_df = pd.read_csv(input_data, index_col=0)
@@ -405,12 +421,12 @@ class OmicDataset(Dataset):
             common_ph_feat_list = []
             self.ph_df = self.ph_df.iloc[:, 2:]
             for ph in self.ph_feat_list:
-                common_ph_feat_list.append(ph.split("_")[0]+"_"+ph.split("_")[1])
+                common_ph_feat_list.append(ph.split("_")[0] + "_" + ph.split("_")[1])
             common_ph_feat_list = np.array(common_ph_feat_list)
             common_ph_feat_list = np.unique(common_ph_feat_list)
             data_ph_list = []
             for ph in self.ph_df.index.values:
-                ph_feat = ph.split("_")[0]+"_"+ph.split("_")[-1]
+                ph_feat = ph.split("_")[0] + "_" + ph.split("_")[-1]
                 data_ph_list.append(ph_feat)
             self.ph_df.index = data_ph_list
             self.ph_df = self.ph_df[~self.ph_df.index.duplicated(keep='first')]
@@ -430,14 +446,14 @@ class OmicDataset(Dataset):
         if self.ph_df is not None:
             ph_input_sub = self.ph_df.loc[intersect_ph_feat, common_input_samples]
             ph_input_sub.index = intersect_ph
-            ph_input_sub = ph_input_sub+20
+            ph_input_sub = ph_input_sub + 20
             positions = [self.ph_feat_list.index(x) for x in intersect_ph if x in self.ph_feat_list]
             ph_input_s.index = self.ph_feat_list
             ph_input_s.columns = common_input_samples
             ph_input_s.iloc[positions] = ph_input_sub
         # for s in input_samples:
         for s in tqdm(input_samples, mininterval=2, desc=' -Tot it %d' % len(input_samples),
-                        leave=True, file=sys.stdout):
+                      leave=True, file=sys.stdout):
             inputs = input_sub[s]
             target = target_sub[s]
             data_type = "UNKNOWN"

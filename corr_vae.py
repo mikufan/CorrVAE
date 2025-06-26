@@ -98,6 +98,8 @@ class MultiOmicsLinformer(nn.Module):
         self.custom = custom
         self.depth = depth
         self.heads = n_heads
+        self.result_path = "../output/attn_map"
+        self.all_attn = []
         n_feats = input_embs.num_embeddings
         # 输入嵌入 × 表达量作为输入： shape = (batch_size, num_genes, embedding_dim)
         self.attn_map = None  # 用于存储attention map
@@ -140,6 +142,10 @@ class MultiOmicsLinformer(nn.Module):
         scale = head_dim ** -0.5
         dots = torch.matmul(q, k.transpose(-1, -2)) * scale
         attn = dots.softmax(dim=-1)
+
+        print("x.shape:", x.shape)  # should be (B, N, D)
+        print("q.shape:", q.shape)  # should be (B, N, D)
+        print("attn.shape:", attn.shape)
 
         self.attn_map = attn.detach().cpu()
 
@@ -442,10 +448,13 @@ class CorrVAE(nn.Module):
             if isinstance(valid_data.dataset, Subset) else valid_data.dataset.ac_df
         type_name_dict = train_data.dataset.dataset.type_name_dict \
             if isinstance(train_data.dataset, Subset) else train_data.dataset.type_name_dict
+        all_attn = []
+        all_types = []
         for n in range(n_epochs):
             self.train()
             n_batch = len(train_data)
             total_loss = 0.0
+
             for data_batch in tqdm(train_data, mininterval=2, desc=' -Tot it %d' % n_batch,
                                    leave=True, file=sys.stdout):
                 batch_size = len(data_batch)
@@ -471,7 +480,21 @@ class CorrVAE(nn.Module):
                 batch_loss.backward()
                 self.optimizer.step()
                 total_loss += batch_loss
+                if self.lin_encoder:
+                    if n == n_epochs-1:
+                        all_attn.append(self.mo_lin_encoder.attn_map)
+                        all_types.append(batch_data_type.cpu().detach().numpy())
             self.logger.info("Loss in epoch " + str(n) + ": " + str(total_loss.cpu().detach().numpy() / n_batch))
+            if self.lin_encoder:
+                if n == n_epochs-1:
+                    all_attn = np.array(all_attn)
+                    all_attn = np.mean(all_attn, axis=1)
+                    all_types = np.stack(all_types)
+                    tumor_idx, normal_idx = utils.get_tumor_normal_index(type_name_dict,all_types)
+                    tumor_attn = all_attn[tumor_idx]
+                    normal_attn = all_attn[normal_idx]
+                    tumor_attn = np.mean(tumor_attn,axis=0)
+                    normal_attn = np.mean(normal_attn,axis=0)
             n_valid_batch = len(valid_data)
             self.eval()
             all_targets = []
