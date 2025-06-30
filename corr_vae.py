@@ -20,6 +20,7 @@ from linformer import Linformer, LinformerSelfAttention
 from einops import rearrange
 
 
+
 def vae_loss_function(recon_x, x, mu, logvar):
     recon_loss = nn.functional.mse_loss(recon_x, x, reduction='mean')
     # print(recon_loss)
@@ -98,11 +99,15 @@ class MultiOmicsLinformer(nn.Module):
         self.custom = custom
         self.depth = depth
         self.heads = n_heads
-        self.result_path = "../output/attn_map"
-        self.all_attn = []
+        self.tumor_idx = []
+        self.normal_idx = []
         n_feats = input_embs.num_embeddings
         # 输入嵌入 × 表达量作为输入： shape = (batch_size, num_genes, embedding_dim)
         self.attn_map = None  # 用于存储attention map
+        self.tumor_attn = None
+        self.normal_attn = None
+        self.tumor_max_attn = None
+        self.normal_max_attn = None
         if not self.custom:
             self.encoder = Linformer(
                 dim=embedding_dim,
@@ -112,7 +117,7 @@ class MultiOmicsLinformer(nn.Module):
                 k=k,
             )
             attn = self.encoder.net.layers[-1][0].fn
-            print(attn)
+            # print(attn)
             self.encoder_blocks = None
             self._register_attention_hook()
         else:
@@ -142,17 +147,28 @@ class MultiOmicsLinformer(nn.Module):
         scale = head_dim ** -0.5
         dots = torch.matmul(q, k.transpose(-1, -2)) * scale
         attn = dots.softmax(dim=-1)
+        tumor_attn = attn[self.tumor_idx].sum(dim=0)
+        normal_attn = attn[self.normal_idx].sum(dim=0)
+        tumor_max_attn = attn[self.tumor_idx].mean(dim=1).max(dim=-1).values
+        normal_max_attn = attn[self.normal_idx].mean(dim=1).max(dim=-1).values
+        # print("x.shape:", x.shape)  # should be (B, N, D)
+        # print("q.shape:", q.shape)  # should be (B, N, D)
+        # print("attn.shape:", attn.shape)
 
-        print("x.shape:", x.shape)  # should be (B, N, D)
-        print("q.shape:", q.shape)  # should be (B, N, D)
-        print("attn.shape:", attn.shape)
-
-        self.attn_map = attn.detach().cpu()
+        self.tumor_attn = tumor_attn.mean(dim=0).detach().cpu().numpy()
+        self.normal_attn = normal_attn.mean(dim=0).detach().cpu().numpy()
+        self.tumor_max_attn = tumor_max_attn.detach().cpu().numpy()
+        self.normal_max_attn = normal_max_attn.detach().cpu().numpy()
 
     def forward(self, expression_vector):
         """
         :param expression_vector: shape (batch_size, num_genes)
         """
+        self.attn_map = None
+        self.tumor_attn = None
+        self.normal_attn = None
+        self.tumor_max_attn = None
+        self.normal_max_attn = None
         batch_size, num_genes = expression_vector.shape
 
         # 构造 gene ID 索引
@@ -355,7 +371,7 @@ class CorrVAE(nn.Module):
             var_out = self.fc2_logvar(h1)
             return mu_out, var_out, emb_type
 
-    def linformer_encode(self, x, data_type, ph_x=None, ac_x=None, no_type=False):
+    def linformer_encode(self, x, data_type, type_name_dict,ph_x=None, ac_x=None, no_type=False):
         input_x = x
         if ph_x is not None and ac_x is None:
             input_x = torch.cat((x, ph_x), 1)
@@ -363,6 +379,9 @@ class CorrVAE(nn.Module):
             input_x = torch.cat((x, ac_x), 1)
         if ph_x is not None and ac_x is not None:
             input_x = torch.cat((x, ph_x, ac_x), 1)
+        tumor_idx, normal_idx = utils.get_tumor_normal_index(type_name_dict,data_type.detach().cpu().numpy())
+        self.mo_lin_encoder.tumor_idx = tumor_idx
+        self.mo_lin_encoder.normal_idx = normal_idx
         h1 = self.mo_lin_encoder(input_x)
         h1 = h1.mean(dim=1)  # (B, D)
         if no_type is False:
@@ -402,7 +421,7 @@ class CorrVAE(nn.Module):
         z = self.reparameterize(mu, logvar)
         return z
 
-    def forward(self, x, y, data_type, is_train=True, ph_x=None, ac_x=None, no_type=False):
+    def forward(self, x, y, data_type, type_name_dict,is_train=True, ph_x=None, ac_x=None, no_type=False,):
         x = x.to(self.device)
         y = y.to(self.device)
         data_type = data_type.to(self.device)
@@ -412,7 +431,8 @@ class CorrVAE(nn.Module):
             ac_x = ac_x.to(self.device)
         if not self.trans_encoder:
             if self.lin_encoder:
-                mu, logvar, emb_type = self.linformer_encode(x, data_type, ph_x=ph_x, ac_x=ac_x, no_type=no_type)
+                mu, logvar, emb_type = self.linformer_encode(x, data_type, type_name_dict,
+                                                             ph_x=ph_x, ac_x=ac_x, no_type=no_type)
             else:
                 mu, logvar, emb_type = self.encode(x, data_type, ph_x=ph_x, ac_x=ac_x, no_type=no_type)
         else:
@@ -438,6 +458,8 @@ class CorrVAE(nn.Module):
         best_result = 0.0
         # n_feats = self.gene_embedding.weight.data.shape[0]
         n_feats = self.decode_embedding.weight.data.shape[0]
+        feat_list = train_data.dataset.dataset.feat_list if \
+            isinstance(train_data.dataset, Subset) else train_data.dataset.feat_list
         train_ph_df = train_data.dataset.dataset.ph_df \
             if isinstance(train_data.dataset, Subset) else train_data.dataset.ph_df
         train_ac_df = train_data.dataset.dataset.ac_df \
@@ -448,8 +470,11 @@ class CorrVAE(nn.Module):
             if isinstance(valid_data.dataset, Subset) else valid_data.dataset.ac_df
         type_name_dict = train_data.dataset.dataset.type_name_dict \
             if isinstance(train_data.dataset, Subset) else train_data.dataset.type_name_dict
-        all_attn = []
         all_types = []
+        all_tumor_attn = []
+        all_normal_attn = []
+        all_tumor_max_attn = []
+        all_normal_max_attn = []
         for n in range(n_epochs):
             self.train()
             n_batch = len(train_data)
@@ -475,26 +500,40 @@ class CorrVAE(nn.Module):
                     batch_ac_input = torch.tensor(batch_ac_input, dtype=torch.float32)
 
                 self.optimizer.zero_grad()
-                batch_loss = self.forward(batch_input, batch_target, batch_data_type, ph_x=batch_ph_input,
+                batch_loss = self.forward(batch_input, batch_target, batch_data_type, type_name_dict,ph_x=batch_ph_input,
                                           ac_x=batch_ac_input, no_type=self.no_types)
                 batch_loss.backward()
                 self.optimizer.step()
                 total_loss += batch_loss
                 if self.lin_encoder:
-                    if n == n_epochs-1:
-                        all_attn.append(self.mo_lin_encoder.attn_map)
-                        all_types.append(batch_data_type.cpu().detach().numpy())
+                    if n == n_epochs - 1:
+                        all_tumor_attn.append(self.mo_lin_encoder.tumor_attn)
+                        all_normal_attn.append(self.mo_lin_encoder.normal_attn)
+                        all_tumor_max_attn.append(self.mo_lin_encoder.tumor_max_attn)
+                        all_normal_max_attn.append(self.mo_lin_encoder.normal_max_attn)
+                        all_types.append(batch_data_type.detach().cpu().numpy())
             self.logger.info("Loss in epoch " + str(n) + ": " + str(total_loss.cpu().detach().numpy() / n_batch))
             if self.lin_encoder:
-                if n == n_epochs-1:
-                    all_attn = np.array(all_attn)
-                    all_attn = np.mean(all_attn, axis=1)
+                if n == n_epochs - 1:
+                    all_tumor_attn = np.stack(all_tumor_attn)
+                    all_normal_attn = np.stack(all_normal_attn)
+                    all_tumor_max_attn = np.vstack(all_tumor_max_attn)
+                    all_normal_max_attn = np.vstack(all_normal_max_attn)
                     all_types = np.stack(all_types)
-                    tumor_idx, normal_idx = utils.get_tumor_normal_index(type_name_dict,all_types)
-                    tumor_attn = all_attn[tumor_idx]
-                    normal_attn = all_attn[normal_idx]
-                    tumor_attn = np.mean(tumor_attn,axis=0)
-                    normal_attn = np.mean(normal_attn,axis=0)
+                    all_types = all_types.flatten()
+                    # all_attn = np.mean(all_attn, axis=1)
+                    all_tumor_idx, all_normal_idx = utils.get_tumor_normal_index(type_name_dict,all_types)
+                    tumor_attn = np.sum(all_tumor_attn, axis=0)/len(all_tumor_idx)
+                    normal_attn = np.sum(all_normal_attn, axis=0)/len(all_normal_idx)
+                    attn_diff = tumor_attn-normal_attn
+                    tumor_attn_pd = pd.DataFrame(data=tumor_attn,index=feat_list)
+                    normal_attn_pd = pd.DataFrame(data=normal_attn, index=feat_list)
+                    tumor_attn_pd.to_csv('../output/corr_vae_model/tumor_attn.csv')
+                    normal_attn_pd.to_csv('../output/corr_vae_model/normal_attn.csv')
+                    tumor_max_attn_pd = pd.DataFrame(data=all_tumor_max_attn, columns=feat_list)
+                    normal_max_attn_pd = pd.DataFrame(data=all_normal_max_attn, columns=feat_list)
+                    tumor_max_attn_pd.to_csv('../output/corr_vae_model/tumor_max_attn.csv')
+                    normal_max_attn_pd.to_csv('../output/corr_vae_model/normal_max_attn.csv')
             n_valid_batch = len(valid_data)
             self.eval()
             all_targets = []
@@ -519,7 +558,7 @@ class CorrVAE(nn.Module):
                 if valid_batch_ac_input is not None:
                     valid_batch_ac_input = torch.tensor(valid_batch_ac_input, dtype=torch.float32)
 
-                preds, targets = self.forward(valid_batch_input, valid_batch_target, valid_batch_data_type,
+                preds, targets = self.forward(valid_batch_input, valid_batch_target, valid_batch_data_type,type_name_dict,
                                               is_train=False, ph_x=valid_batch_ph_input, ac_x=valid_batch_ac_input,
                                               no_type=self.no_types)
                 preds = preds.cpu().detach().numpy()
@@ -547,6 +586,7 @@ class CorrVAE(nn.Module):
         id_2_type_dict = {}
         for key, value in data_type_dict.items():
             id_2_type_dict[value] = key
+        type_name_dict = data_loader.dataset.dataset.type_name_dict
         self.eval()
         all_inputs = []
         all_preds = []
@@ -578,7 +618,7 @@ class CorrVAE(nn.Module):
             if batch_ac_input is not None:
                 batch_ac_input = torch.tensor(batch_ac_input, dtype=torch.float32)
 
-            preds, targets = self.forward(batch_input, batch_target, batch_data_type, is_train=False,
+            preds, targets = self.forward(batch_input, batch_target, batch_data_type, type_name_dict,is_train=False,
                                           ph_x=batch_ph_input, ac_x=batch_ac_input, no_type=self.no_types)
             preds = preds.cpu().detach().numpy()
             targets = targets.cpu().detach().numpy()
