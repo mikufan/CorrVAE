@@ -52,6 +52,7 @@ if __name__ == "__main__":
     parser.add_argument('--ad_hoc', '-ah', action='store_true', default=False)
     parser.add_argument('--unified_train', '-ut', action='store_true', default=False)
     parser.add_argument('--no_type', '-nt', action='store_true', default=False)
+    parser.add_argument('--visualize_lv', '-lv', action='store_true', default=False)
 
     parser.add_argument('--ood_test', '-ot', action='store_true', default=False)
     parser.add_argument('--ood_test_path', '-oot', type=str, default='../data/brain_cptac_protein.csv')
@@ -243,6 +244,9 @@ if __name__ == "__main__":
                                     if model_data[idx].sample_id.endswith('.N')]
             tumor_train_indices = [idx for idx in range(len(model_train_dataset))
                                    if not model_data[idx].sample_id.endswith('.N')]
+        if args.visualize_lv:
+            r2, pcc, scc = load_model.model_test(train_data, result_path=result_path,lv_visualize=True)
+
         normal_train_data = Subset(model_data, normal_train_indices)
         tumor_train_data = Subset(model_data, tumor_train_indices)
         normal_train_dataset = DataLoader(normal_train_data, batch_size=args.batch_size, shuffle=True,
@@ -278,8 +282,8 @@ if __name__ == "__main__":
         normal_valid_dataset = DataLoader(normal_valid_data, batch_size=args.batch_size, shuffle=True,
                                           collate_fn=utils.collate_fn)
         normal_valid_result_path = result_path + "_valid_normal_part"
-        normal_valid_total_r2, normal_valid_pcc,normal_valid_scc = load_model.model_test(normal_valid_dataset,
-                                                                        result_path=normal_valid_result_path)
+        normal_valid_total_r2, normal_valid_pcc, normal_valid_scc = load_model.model_test(normal_valid_dataset,
+                                                                                          result_path=normal_valid_result_path)
         print("Normal valid PCC is " + str(normal_valid_pcc))
         print("Normal valid SCC is " + str(normal_valid_scc))
         print("Total valid R2 score: " + str(normal_valid_total_r2))

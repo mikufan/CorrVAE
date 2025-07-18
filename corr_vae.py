@@ -20,7 +20,6 @@ from linformer import Linformer, LinformerSelfAttention
 from einops import rearrange
 
 
-
 def vae_loss_function(recon_x, x, mu, logvar):
     recon_loss = nn.functional.mse_loss(recon_x, x, reduction='mean')
     # print(recon_loss)
@@ -93,7 +92,7 @@ class MultiOmicsTransformer(nn.Module):
 
 
 class MultiOmicsLinformer(nn.Module):
-    def __init__(self, input_embs, embedding_dim=64, k=256, depth=1, n_heads=4, custom=False):
+    def __init__(self, input_embs, embedding_dim=64, k=32, depth=1, n_heads=4, custom=False):
         super(MultiOmicsLinformer, self).__init__()
         self.input_embedding = input_embs
         self.custom = custom
@@ -155,10 +154,14 @@ class MultiOmicsLinformer(nn.Module):
         # print("q.shape:", q.shape)  # should be (B, N, D)
         # print("attn.shape:", attn.shape)
 
-        self.tumor_attn = tumor_attn.mean(dim=0).detach().cpu().numpy()
-        self.normal_attn = normal_attn.mean(dim=0).detach().cpu().numpy()
-        self.tumor_max_attn = tumor_max_attn.detach().cpu().numpy()
-        self.normal_max_attn = normal_max_attn.detach().cpu().numpy()
+        # self.tumor_attn = tumor_attn.mean(dim=0).detach().cpu().numpy()
+        # self.normal_attn = normal_attn.mean(dim=0).detach().cpu().numpy()
+        # self.tumor_max_attn = tumor_max_attn.detach().cpu().numpy()
+        # self.normal_max_attn = normal_max_attn.detach().cpu().numpy()
+        self.tumor_attn = tumor_attn.mean(dim=0).detach().cpu()
+        self.normal_attn = normal_attn.mean(dim=0).detach().cpu()
+        self.tumor_max_attn = tumor_max_attn.detach().cpu()
+        self.normal_max_attn = normal_max_attn.detach().cpu()
 
     def forward(self, expression_vector):
         """
@@ -371,7 +374,7 @@ class CorrVAE(nn.Module):
             var_out = self.fc2_logvar(h1)
             return mu_out, var_out, emb_type
 
-    def linformer_encode(self, x, data_type, type_name_dict,ph_x=None, ac_x=None, no_type=False):
+    def linformer_encode(self, x, data_type, type_name_dict, ph_x=None, ac_x=None, no_type=False):
         input_x = x
         if ph_x is not None and ac_x is None:
             input_x = torch.cat((x, ph_x), 1)
@@ -379,7 +382,7 @@ class CorrVAE(nn.Module):
             input_x = torch.cat((x, ac_x), 1)
         if ph_x is not None and ac_x is not None:
             input_x = torch.cat((x, ph_x, ac_x), 1)
-        tumor_idx, normal_idx = utils.get_tumor_normal_index(type_name_dict,data_type.detach().cpu().numpy())
+        tumor_idx, normal_idx = utils.get_tumor_normal_index(type_name_dict, data_type.detach().cpu().numpy())
         self.mo_lin_encoder.tumor_idx = tumor_idx
         self.mo_lin_encoder.normal_idx = normal_idx
         h1 = self.mo_lin_encoder(input_x)
@@ -421,7 +424,7 @@ class CorrVAE(nn.Module):
         z = self.reparameterize(mu, logvar)
         return z
 
-    def forward(self, x, y, data_type, type_name_dict,is_train=True, ph_x=None, ac_x=None, no_type=False,):
+    def forward(self, x, y, data_type, type_name_dict, is_train=True, ph_x=None, ac_x=None, no_type=False):
         x = x.to(self.device)
         y = y.to(self.device)
         data_type = data_type.to(self.device)
@@ -449,7 +452,7 @@ class CorrVAE(nn.Module):
                 all_loss = vae_loss + self.alpha * type_con_loss
                 return all_loss
         else:
-            return recon_y, y
+            return recon_y, y, z
 
     def model_training(self, train_data, n_epochs, valid_data, model_path):
         self.logger = utils.get_logger('../output/log/train_log.log')
@@ -470,6 +473,15 @@ class CorrVAE(nn.Module):
             if isinstance(valid_data.dataset, Subset) else valid_data.dataset.ac_df
         type_name_dict = train_data.dataset.dataset.type_name_dict \
             if isinstance(train_data.dataset, Subset) else train_data.dataset.type_name_dict
+        all_feat_list = feat_list
+        if train_ph_df is not None:
+            ph_feat_list = train_data.dataset.dataset.ph_feat_list if \
+                isinstance(train_data.dataset, Subset) else train_data.dataset.ph_feat_list
+            all_feat_list = all_feat_list + ph_feat_list
+        if train_ac_df is not None:
+            ac_feat_list = train_data.dataset.dataset.ac_feat_list if \
+                isinstance(train_data.dataset, Subset) else train_data.dataset.ac_feat_list
+            all_feat_list = all_feat_list + ac_feat_list
         all_types = []
         all_tumor_attn = []
         all_normal_attn = []
@@ -500,7 +512,8 @@ class CorrVAE(nn.Module):
                     batch_ac_input = torch.tensor(batch_ac_input, dtype=torch.float32)
 
                 self.optimizer.zero_grad()
-                batch_loss = self.forward(batch_input, batch_target, batch_data_type, type_name_dict,ph_x=batch_ph_input,
+                batch_loss = self.forward(batch_input, batch_target, batch_data_type, type_name_dict,
+                                          ph_x=batch_ph_input,
                                           ac_x=batch_ac_input, no_type=self.no_types)
                 batch_loss.backward()
                 self.optimizer.step()
@@ -515,23 +528,31 @@ class CorrVAE(nn.Module):
             self.logger.info("Loss in epoch " + str(n) + ": " + str(total_loss.cpu().detach().numpy() / n_batch))
             if self.lin_encoder:
                 if n == n_epochs - 1:
-                    all_tumor_attn = np.stack(all_tumor_attn)
-                    all_normal_attn = np.stack(all_normal_attn)
-                    all_tumor_max_attn = np.vstack(all_tumor_max_attn)
-                    all_normal_max_attn = np.vstack(all_normal_max_attn)
+                    # all_tumor_attn = np.stack(all_tumor_attn)
+                    # all_normal_attn = np.stack(all_normal_attn)
+                    # all_tumor_max_attn = np.vstack(all_tumor_max_attn)
+                    # all_normal_max_attn = np.vstack(all_normal_max_attn)
+                    all_tumor_attn = torch.stack(all_tumor_attn, dim=0).numpy()
+                    all_normal_attn = torch.stack(all_normal_attn, dim=0).numpy()
+                    all_tumor_max_attn = torch.cat(all_tumor_max_attn, dim=0).numpy()
+                    all_normal_max_attn = torch.cat(all_normal_max_attn, dim=0).numpy()
                     all_types = np.stack(all_types)
                     all_types = all_types.flatten()
                     # all_attn = np.mean(all_attn, axis=1)
-                    all_tumor_idx, all_normal_idx = utils.get_tumor_normal_index(type_name_dict,all_types)
-                    tumor_attn = np.sum(all_tumor_attn, axis=0)/len(all_tumor_idx)
-                    normal_attn = np.sum(all_normal_attn, axis=0)/len(all_normal_idx)
-                    attn_diff = tumor_attn-normal_attn
-                    tumor_attn_pd = pd.DataFrame(data=tumor_attn,index=feat_list)
-                    normal_attn_pd = pd.DataFrame(data=normal_attn, index=feat_list)
+                    all_tumor_idx, all_normal_idx = utils.get_tumor_normal_index(type_name_dict, all_types)
+                    tumor_attn = np.sum(all_tumor_attn, axis=0) / len(all_tumor_idx)
+                    normal_attn = np.sum(all_normal_attn, axis=0) / len(all_normal_idx)
+                    attn_diff = tumor_attn - normal_attn
+                    tumor_attn_pd = pd.DataFrame(data=tumor_attn, index=all_feat_list)
+                    normal_attn_pd = pd.DataFrame(data=normal_attn, index=all_feat_list)
                     tumor_attn_pd.to_csv('../output/corr_vae_model/tumor_attn.csv')
                     normal_attn_pd.to_csv('../output/corr_vae_model/normal_attn.csv')
-                    tumor_max_attn_pd = pd.DataFrame(data=all_tumor_max_attn, columns=feat_list)
-                    normal_max_attn_pd = pd.DataFrame(data=all_normal_max_attn, columns=feat_list)
+                    if train_ph_df is not None or train_ac_df is not None:
+                        tumor_max_attn_pd = pd.DataFrame(data=all_tumor_max_attn.T, index=all_feat_list)
+                        normal_max_attn_pd = pd.DataFrame(data=all_normal_max_attn.T, index=all_feat_list)
+                    else:
+                        tumor_max_attn_pd = pd.DataFrame(data=all_tumor_max_attn, columns=all_feat_list)
+                        normal_max_attn_pd = pd.DataFrame(data=all_normal_max_attn, columns=all_feat_list)
                     tumor_max_attn_pd.to_csv('../output/corr_vae_model/tumor_max_attn.csv')
                     normal_max_attn_pd.to_csv('../output/corr_vae_model/normal_max_attn.csv')
             n_valid_batch = len(valid_data)
@@ -558,9 +579,10 @@ class CorrVAE(nn.Module):
                 if valid_batch_ac_input is not None:
                     valid_batch_ac_input = torch.tensor(valid_batch_ac_input, dtype=torch.float32)
 
-                preds, targets = self.forward(valid_batch_input, valid_batch_target, valid_batch_data_type,type_name_dict,
-                                              is_train=False, ph_x=valid_batch_ph_input, ac_x=valid_batch_ac_input,
-                                              no_type=self.no_types)
+                preds, targets, _ = self.forward(valid_batch_input, valid_batch_target, valid_batch_data_type,
+                                                 type_name_dict,
+                                                 is_train=False, ph_x=valid_batch_ph_input, ac_x=valid_batch_ac_input,
+                                                 no_type=self.no_types)
                 preds = preds.cpu().detach().numpy()
                 targets = targets.cpu().detach().numpy()
                 for i in range(batch_size):
@@ -580,19 +602,24 @@ class CorrVAE(nn.Module):
                 else:
                     torch.save(self, model_path + "/trained_corr_vae_model_no_type.pt")
 
-    def model_test(self, data_loader, result_path=None):
+    def model_test(self, data_loader, result_path=None, lv_visualize=False):
         n_batch = len(data_loader)
-        data_type_dict = data_loader.dataset.dataset.data_type_dict
+        data_type_dict = data_loader.dataset.dataset.data_type_dict \
+            if isinstance(data_loader.dataset, Subset) else data_loader.dataset.data_type_dict
+        # data_type_dict = data_loader.dataset.dataset.data_type_dict
         id_2_type_dict = {}
         for key, value in data_type_dict.items():
             id_2_type_dict[value] = key
-        type_name_dict = data_loader.dataset.dataset.type_name_dict
+        type_name_dict = data_loader.dataset.dataset.type_name_dict \
+            if isinstance(data_loader.dataset, Subset) else data_loader.dataset.type_name_dict
+        # type_name_dict = data_loader.dataset.dataset.type_name_dict
         self.eval()
         all_inputs = []
         all_preds = []
         all_targets = []
         all_types = []
         all_data_ids = []
+        all_zs = []
         # test_ph_df = data_loader.dataset.dataset.ph_df \
         #     if isinstance(data_loader.dataset, Subset) else data_loader.dataset.ph_df
         # test_ac_df = data_loader.dataset.dataset.ac_df \
@@ -618,22 +645,23 @@ class CorrVAE(nn.Module):
             if batch_ac_input is not None:
                 batch_ac_input = torch.tensor(batch_ac_input, dtype=torch.float32)
 
-            preds, targets = self.forward(batch_input, batch_target, batch_data_type, type_name_dict,is_train=False,
-                                          ph_x=batch_ph_input, ac_x=batch_ac_input, no_type=self.no_types)
+            preds, targets, z = self.forward(batch_input, batch_target, batch_data_type, type_name_dict, is_train=False,
+                                             ph_x=batch_ph_input, ac_x=batch_ac_input, no_type=self.no_types)
             preds = preds.cpu().detach().numpy()
             targets = targets.cpu().detach().numpy()
+            zs = z.cpu().detach().numpy()
             for i in range(batch_size):
                 all_targets.append(targets[i])
                 all_preds.append(preds[i])
                 all_types.append(batch_data_type[i])
                 all_inputs.append(batch_input[i].cpu().detach().numpy())
                 all_data_ids.append(batch_data_id[i])
-
+                all_zs.append(zs[i])
         all_targets = np.hstack(all_targets)
         all_preds = np.hstack(all_preds)
         all_inputs = np.hstack(all_inputs)
         all_data_ids = np.hstack(all_data_ids)
-
+        all_zs = np.stack(all_zs)
         all_targets_array = all_targets.reshape(-1, n_feats)
         all_preds_array = all_preds.reshape(-1, n_feats)
         all_inputs_array = all_inputs.reshape(-1, n_feats)
@@ -678,6 +706,9 @@ class CorrVAE(nn.Module):
             all_targets_df.to_csv(result_path + "_targets_no_type.csv")
             all_preds_df.to_csv(result_path + "_preds_no_type.csv")
             all_inputs_df.to_csv(result_path + "_inputs_no_type.csv")
+        if lv_visualize:
+           self.lv_visualize(all_zs, all_types, type_name_dict)
+
 
         return total_r2, pcc, scc
 
@@ -776,6 +807,53 @@ class CorrVAE(nn.Module):
         all_inputs_df.to_csv(result_path + "_inputs.csv")
 
         return total_r2, pcc
+
+    def lv_visualize(self, zs, types, type_name_dict):
+        umap_reducer = umap.UMAP(n_components=2, random_state=42)
+        all_zs_df = pd.DataFrame(data=zs)
+        type_names = []
+        for t in types:
+            type_name = type_name_dict.get(t)
+            type_names.append(type_name)
+        all_zs_df["SampleType"] = type_names
+        zs_2d = umap_reducer.fit_transform(zs)
+        type_color_dict = {"BRCA_TUMOR": "#FFB6C1", "CCRCC_TUMOR": "#DC143C", "HNSCC_TUMOR": "#DB7093",
+                           "HGSC_TUMOR": "#FF69B4",
+                           "LUAD_TUMOR": "#FF1493", "LSCC_TUMOR": "#C71585", "GBM_TUMOR": "#FF00FF",
+                           "COAD_TUMOR": "#FFFF00",
+                           "PDAC_TUMOR": "#CD853F",
+                           "UCEC_TUMOR": "#FFA500", "CCRCC_NORMAL": "#0000FF", "HNSCC_NORMAL": "#00BFFF",
+                           "LUAD_NORMAL": "#00CED1",
+                           "LSCC_NORMAL": "#2E8B57", "PDAC_NORMAL": "#2C2754"}
+        zs_df = pd.DataFrame(data={"X": zs_2d[:, 0], "Y": zs_2d[:, 1], "DataType": types})
+
+        tumor_idx, normal_idx = utils.get_tumor_normal_index(type_name_dict, types)
+        unique_types = np.unique(types)
+        plt.figure(figsize=(10, 7))
+        for i in unique_types:
+            # if i in draw_list:
+            type_idx = zs_df[zs_df['DataType'] == i].index.tolist()
+            type_name = type_name_dict[i]
+            plt.scatter(zs_2d[type_idx, 0], zs_2d[type_idx, 1], s=1, c=type_color_dict[type_name],label=type_name)
+        # plt.scatter(zs_2d[tumor_idx, 0], zs_2d[tumor_idx, 1], s=20, c="red")
+        # plt.scatter(zs_2d[normal_idx, 0], zs_2d[normal_idx, 1], s=20, c="blue")
+        plt.title('UMAP Visualization of Sample Embeddings')
+        plt.xlabel('UMAP Component 1')
+        plt.ylabel('UMAP Component 2')
+        plt.legend(
+            title="Sample Type",
+            fontsize=9,
+            title_fontsize=11,
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.15),
+            ncol=4,
+            frameon=False
+        )
+
+        plt.tight_layout()
+        plt.savefig(
+            f"../output/model_fig/vae_z_umap_embeddings_samples_TUMOR_NORMAL.svg", format="svg")
+        all_zs_df.to_csv("../output/corr_vae_model/zs_df.csv")
 
     def visualize_emb(self, feat_list, model_class, method="tsne", cluster_method="kmeans", num_clusters=9):
         if model_class == 1:
