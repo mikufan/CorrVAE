@@ -81,6 +81,8 @@ def calculate_slopes(A, B, threshold=1e-4):
                 bias_df.at[t, col] = bias
                 # pred_df.loc[filtered_index, col] = preds
                 r2 = r2_score(y_filtered, preds)
+                pcc = pearsonr(y_filtered, preds)
+                scc = spearmanr(y_filtered, preds)
                 r2_df.at[t, col] = r2
     result_df = result_df.fillna(0)
     bias_df = bias_df.fillna(0)
@@ -131,14 +133,17 @@ def calculate_mse(input, target, slope, bias, threshold=1e-4):
 
             # 存储结果
             result.at[type_val, col] = mse
+    # y_tr = target.values[:, :-1].flatten()
+    # y_pr = pred.values[:,:-1].flatten()
+    # y_tr = np.vstack(y_tr)
     y_true = np.hstack(y_true)
     y_pred = np.hstack(y_preds)
     result = result.fillna(0)
     # 计算R²
     r2 = r2_score(y_true, y_pred)
     pcc, pv = pearsonr(y_true, y_pred)
-
-    return result, r2, pcc
+    scc, _ = spearmanr(y_true, y_pred)
+    return result, r2, pcc, scc
 
 
 def get_tumor_normal_index(type_dict, type_list):
@@ -147,13 +152,25 @@ def get_tumor_normal_index(type_dict, type_list):
     normal_index = []
     for t in type_list:
         type_name.append(type_dict.get(t))
-    for i,n in enumerate(type_name):
+    for i, n in enumerate(type_name):
         if n.split("_")[1] == "TUMOR":
             tumor_index.append(i)
         if n.split("_")[1] == "NORMAL":
             normal_index.append(i)
     return tumor_index, normal_index
 
+
+def get_tumor_normal_types(type_dict, type_list):
+    type_name = []
+    tumor_normal_types = []
+    for t in type_list:
+        type_name.append(type_dict.get(t))
+    for i, n in enumerate(type_name):
+        if n.split("_")[1] == "TUMOR":
+            tumor_normal_types.append(0)
+        if n.split("_")[1] == "NORMAL":
+            tumor_normal_types.append(1)
+    return tumor_normal_types
 
 
 class DataItem(object):
@@ -517,12 +534,13 @@ class OmicDataset(Dataset):
             sample_type_list.append(sample_type)
         t_input_df["type"] = sample_type_list
         t_target_df["type"] = sample_type_list
-        mse_df, r2, pcc = calculate_mse(t_input_df, t_target_df, slope_df, bias_df)
-        return mse_df, r2, pcc
+        mse_df, r2, pcc, scc = calculate_mse(t_input_df, t_target_df, slope_df, bias_df)
+        return mse_df, r2, pcc, scc
 
     def linear_fit(self, indices, slope_df, bias_df, model_class, data_set):
-        linear_mse_df, r2, pcc = self.get_linear_mse(indices, slope_df, bias_df)
+        linear_mse_df, r2, pcc, scc = self.get_linear_mse(indices, slope_df, bias_df)
         linear_mse_df.to_csv(
             f"../output/corr_vae_model/corr_vae_model_TUMOR_AND_NORMAL_{data_set}_linear_mse_{model_class}.csv")
         print(f"Linear {data_set} {model_class} r2: " + str(r2))
         print(f"Linear {data_set} {model_class} pcc: " + str(pcc))
+        print(f"Linear {data_set} {model_class} scc: " + str(scc))

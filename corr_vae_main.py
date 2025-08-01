@@ -2,7 +2,8 @@ import argparse
 
 import pandas as pd
 
-from corr_vae_model import utils
+# from corr_vae_model import utils
+import utils
 from torch.utils.data import DataLoader, Subset
 import corr_vae
 import torch
@@ -37,9 +38,12 @@ if __name__ == "__main__":
     parser.add_argument('--transformer_encoder', '-te', action='store_true', default=False)
     parser.add_argument('--linformer_encoder', '-le', action='store_true', default=False)
     parser.add_argument('--contrastive_loss', '-cl', action='store_true', default=False)
+    parser.add_argument('--tn_type', '-tn', action='store_true', default=False)
     parser.add_argument('--alpha', type=float, default=0.5)
     parser.add_argument('--custom_linformer', '-cle', action='store_true', default=False)
     # parser.add_argument('--attn_output','-ao',type=str, default='../output/corr_vae_model/attn_map.csv')
+    parser.add_argument('--lin_k', type=int, default=256)
+    parser.add_argument('--register_hook', '-rh', action='store_false', default=True)
     # config
     parser.add_argument('--test_only', action='store_true', help='only do test with trained models', default=False)
     parser.add_argument('--test_size', type=float, default=0.25)
@@ -93,9 +97,6 @@ if __name__ == "__main__":
         model_data = utils.OmicDataset(args.input, args.target, args.sample_dict, model_class, feat_dict=gene_dict,
                                        ph_input=ph_input, ac_input=ac_input)
         if not args.ad_hoc:
-            # model_train_dataset, model_valid_test_dataset = utils.stratified_split(model_data, args.test_size,
-            #                                                                  len(model_data.data_type_dict),
-            #                                                                  random_state=42)
             model_train_dataset, model_valid_dataset, model_test_dataset = utils.stratified_3_split(model_data,
                                                                                                     1 - args.test_size,
                                                                                                     0.5 * args.test_size,
@@ -143,15 +144,17 @@ if __name__ == "__main__":
             linear_df = pd.read_csv(f"../output/corr_vae_model/corr_vae_model_{model_class}_linear.csv", index_col=0)
             bias_df = pd.read_csv(f"../output/corr_vae_model/corr_vae_model_{model_class}_bias.csv", index_col=0)
         if not args.unified_train:
-            valid_linear_mse_df, valid_r2, valid_pcc = model_data.get_linear_mse(model_valid_dataset.indices, linear_df,
-                                                                                 bias_df)
+            valid_linear_mse_df, valid_r2, valid_pcc, valid_scc = model_data.get_linear_mse(model_valid_dataset.indices,
+                                                                                            linear_df, bias_df)
             valid_linear_mse_df.to_csv(f"../output/corr_vae_model/corr_vae_model_{model_class}_valid_linear_mse.csv")
             print("Linear valid r2: " + str(valid_r2))
             print("Linear valid pcc: " + str(valid_pcc))
-            linear_mse_df, r2, pcc = model_data.get_linear_mse(model_test_dataset.indices, linear_df, bias_df)
+            print("Linear valid scc: " + str(valid_scc))
+            linear_mse_df, r2, pcc, scc = model_data.get_linear_mse(model_test_dataset.indices, linear_df, bias_df)
             linear_mse_df.to_csv(f"../output/corr_vae_model/corr_vae_model_{model_class}_linear_mse.csv")
             print("Linear r2: " + str(r2))
             print("Linear pcc: " + str(pcc))
+            print("Linear scc: " + str(scc))
             sys.exit()
         else:
             normal_train_indices = [idx for idx in model_train_dataset.indices
@@ -165,37 +168,40 @@ if __name__ == "__main__":
             tumor_valid_indices = [idx for idx in model_valid_dataset.indices
                                    if not model_data[idx].sample_id.endswith('.N')]
             # model_data.linear_fit
-            valid_normal_linear_mse_df, valid_normal_r2, valid_normal_pcc = model_data.get_linear_mse(
+            valid_normal_linear_mse_df, valid_normal_r2, valid_normal_pcc, valid_normal_scc = model_data.get_linear_mse(
                 normal_valid_indices,
                 linear_df, bias_df)
             valid_normal_linear_mse_df.to_csv(
                 f"../output/corr_vae_model/corr_vae_model_{model_class}_valid_linear_mse_normal.csv")
             print("Linear valid normal r2: " + str(valid_normal_r2))
             print("Linear valid normal pcc: " + str(valid_normal_pcc))
-            valid_tumor_linear_mse_df, valid_tumor_r2, valid_tumor_pcc = model_data.get_linear_mse(
+            print("Linear valid normal scc: " + str(valid_normal_scc))
+            valid_tumor_linear_mse_df, valid_tumor_r2, valid_tumor_pcc, valid_tumor_scc = model_data.get_linear_mse(
                 tumor_valid_indices, linear_df, bias_df)
             valid_tumor_linear_mse_df.to_csv(
                 f"../output/corr_vae_model/corr_vae_model_{model_class}_valid_linear_mse_tumor.csv")
             print("Linear valid tumor r2: " + str(valid_tumor_r2))
             print("Linear valid tumor pcc: " + str(valid_tumor_pcc))
-
+            print("Linear valid tumor scc: " + str(valid_tumor_scc))
             normal_test_indices = [idx for idx in model_test_dataset.indices
                                    if model_data[idx].sample_id.endswith('.N')]
             tumor_test_indices = [idx for idx in model_test_dataset.indices
                                   if not model_data[idx].sample_id.endswith('.N')]
-            test_normal_linear_mse_df, test_normal_r2, test_normal_pcc = model_data.get_linear_mse(
+            test_normal_linear_mse_df, test_normal_r2, test_normal_pcc, test_normal_scc = model_data.get_linear_mse(
                 normal_test_indices,
                 linear_df, bias_df)
             test_normal_linear_mse_df.to_csv(
                 f"../output/corr_vae_model/corr_vae_model_{model_class}_test_linear_mse_normal.csv")
             print("Linear test normal r2: " + str(test_normal_r2))
             print("Linear test normal pcc: " + str(test_normal_pcc))
-            test_tumor_linear_mse_df, test_tumor_r2, test_tumor_pcc = model_data.get_linear_mse(
+            print("Linear test normal scc: " + str(test_normal_scc))
+            test_tumor_linear_mse_df, test_tumor_r2, test_tumor_pcc, test_tumor_scc = model_data.get_linear_mse(
                 tumor_test_indices, linear_df, bias_df)
             test_tumor_linear_mse_df.to_csv(
                 f"../output/corr_vae_model/corr_vae_model_{model_class}_test_linear_mse_tumor.csv")
             print("Linear test tumor r2: " + str(test_tumor_r2))
             print("Linear test tumor pcc: " + str(test_tumor_pcc))
+            print("Linear test tumor scc: " + str(test_tumor_scc))
             sys.exit()
 
     if not args.test_only:
@@ -205,7 +211,8 @@ if __name__ == "__main__":
                                           n_phs=n_phs, n_acs=n_acs, device=args.device, no_types=args.no_type,
                                           trans_encoder=args.transformer_encoder, lin_encoder=args.linformer_encoder,
                                           con_loss=args.contrastive_loss, alpha=args.alpha,
-                                          cus_line=args.custom_linformer)
+                                          cus_line=args.custom_linformer, lin_k=args.lin_k, tn_type=args.tn_type,
+                                          register_hook=args.register_hook)
         if args.device != "cpu":
             device = torch.device(args.device if torch.cuda.is_available() else "cpu")
         corr_vae_model.to(corr_vae_model.device)
@@ -219,6 +226,15 @@ if __name__ == "__main__":
         load_model_name = args.load_model_path
         load_model_name = load_model_name.split(".")[0] + "_no_type.pt"
     load_model = torch.load(args.model_output + "/" + load_model_name)
+    # load_model = corr_vae.CorrVAE(hidden_dim=args.hidden_dim, latent_dim=args.latent_dim,
+    #                               embedding_dim=args.embedding_dim, n_feats=n_feats,
+    #                               type_embedding_dim=args.type_embedding_dim, n_types=n_types,
+    #                               n_phs=n_phs, n_acs=n_acs, device=args.device, no_types=args.no_type,
+    #                               trans_encoder=args.transformer_encoder, lin_encoder=args.linformer_encoder,
+    #                               con_loss=args.contrastive_loss, alpha=args.alpha,
+    #                               cus_line=args.custom_linformer, lin_k=args.lin_k, tn_type=args.tn_type,
+    #                               register_hook=args.register_hook)
+    # load_model.load_state_dict(torch.load(args.model_output + "/" + load_model_name))
     if args.continue_train:
         if args.device != "cpu":
             device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -245,7 +261,7 @@ if __name__ == "__main__":
             tumor_train_indices = [idx for idx in range(len(model_train_dataset))
                                    if not model_data[idx].sample_id.endswith('.N')]
         if args.visualize_lv:
-            r2, pcc, scc = load_model.model_test(train_data, result_path=result_path,lv_visualize=True)
+            r2, pcc, scc = load_model.model_test(train_data, result_path=result_path, lv_visualize=True)
 
         normal_train_data = Subset(model_data, normal_train_indices)
         tumor_train_data = Subset(model_data, tumor_train_indices)

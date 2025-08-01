@@ -92,7 +92,7 @@ class MultiOmicsTransformer(nn.Module):
 
 
 class MultiOmicsLinformer(nn.Module):
-    def __init__(self, input_embs, embedding_dim=64, k=32, depth=1, n_heads=4, custom=False):
+    def __init__(self, input_embs, embedding_dim=64, k=32, depth=1, n_heads=4, custom=False,register_hook=True):
         super(MultiOmicsLinformer, self).__init__()
         self.input_embedding = input_embs
         self.custom = custom
@@ -100,6 +100,7 @@ class MultiOmicsLinformer(nn.Module):
         self.heads = n_heads
         self.tumor_idx = []
         self.normal_idx = []
+        self.register_hook = register_hook
         n_feats = input_embs.num_embeddings
         # 输入嵌入 × 表达量作为输入： shape = (batch_size, num_genes, embedding_dim)
         self.attn_map = None  # 用于存储attention map
@@ -118,7 +119,8 @@ class MultiOmicsLinformer(nn.Module):
             attn = self.encoder.net.layers[-1][0].fn
             # print(attn)
             self.encoder_blocks = None
-            self._register_attention_hook()
+            if self.register_hook:
+                self._register_attention_hook()
         else:
             self.encoder = None
             self.encoder_blocks = nn.ModuleList([
@@ -239,7 +241,8 @@ def contrastive_loss(z, labels, temperature=0.5):
 
 class CorrVAE(nn.Module):
     def __init__(self, hidden_dim, latent_dim, embedding_dim, n_feats, type_embedding_dim, n_types,
-                 n_phs, n_acs, device, no_types, trans_encoder, lin_encoder, con_loss, alpha, cus_line):
+                 n_phs, n_acs, device, no_types, trans_encoder, lin_encoder, con_loss, alpha, cus_line, lin_k, tn_type,
+                 register_hook):
         super(CorrVAE, self).__init__()
 
         self.device = device
@@ -249,6 +252,9 @@ class CorrVAE(nn.Module):
         self.con_loss = con_loss
         self.alpha = alpha
         self.cus_line = cus_line
+        self.lin_k = lin_k
+        self.tn_type = tn_type
+        self.register_hook = register_hook
         # Encoder
         self.feat_fc = nn.Linear(n_feats, hidden_dim)
         self.fc1 = nn.Linear(n_feats * embedding_dim, hidden_dim)
@@ -298,7 +304,8 @@ class CorrVAE(nn.Module):
         else:
             self.mo_trans_encoder = None
         if self.lin_encoder:
-            self.mo_lin_encoder = MultiOmicsLinformer(self.gene_embedding, embedding_dim, custom=self.cus_line)
+            self.mo_lin_encoder = MultiOmicsLinformer(self.gene_embedding, embedding_dim, custom=self.cus_line,
+                                                      k=self.lin_k,register_hook= self.register_hook)
         else:
             self.mo_lin_encoder = None
 
@@ -448,9 +455,14 @@ class CorrVAE(nn.Module):
             if not self.con_loss:
                 return vae_loss
             else:
-                type_con_loss = contrastive_loss(z, data_type)
+                if self.tn_type:
+                    tn_types = utils.get_tumor_normal_types(type_name_dict, data_type.detach().cpu().numpy())
+                    tn_types = torch.tensor(tn_types).to(self.device)
+                    type_con_loss = contrastive_loss(z, tn_types) #+ contrastive_loss(z, data_type)
+                else:
+                    type_con_loss = contrastive_loss(z, data_type)
                 all_loss = vae_loss + self.alpha * type_con_loss
-                return all_loss
+                return all_loss, vae_loss, type_con_loss
         else:
             return recon_y, y, z
 
@@ -491,7 +503,7 @@ class CorrVAE(nn.Module):
             self.train()
             n_batch = len(train_data)
             total_loss = 0.0
-
+            total_con_loss = 0.0
             for data_batch in tqdm(train_data, mininterval=2, desc=' -Tot it %d' % n_batch,
                                    leave=True, file=sys.stdout):
                 batch_size = len(data_batch)
@@ -512,12 +524,14 @@ class CorrVAE(nn.Module):
                     batch_ac_input = torch.tensor(batch_ac_input, dtype=torch.float32)
 
                 self.optimizer.zero_grad()
-                batch_loss = self.forward(batch_input, batch_target, batch_data_type, type_name_dict,
-                                          ph_x=batch_ph_input,
-                                          ac_x=batch_ac_input, no_type=self.no_types)
+                batch_loss, vae_loss, con_loss = self.forward(batch_input, batch_target, batch_data_type,
+                                                              type_name_dict,
+                                                              ph_x=batch_ph_input,
+                                                              ac_x=batch_ac_input, no_type=self.no_types)
                 batch_loss.backward()
                 self.optimizer.step()
                 total_loss += batch_loss
+                total_con_loss += con_loss
                 if self.lin_encoder:
                     if n == n_epochs - 1:
                         all_tumor_attn.append(self.mo_lin_encoder.tumor_attn)
@@ -526,6 +540,12 @@ class CorrVAE(nn.Module):
                         all_normal_max_attn.append(self.mo_lin_encoder.normal_max_attn)
                         all_types.append(batch_data_type.detach().cpu().numpy())
             self.logger.info("Loss in epoch " + str(n) + ": " + str(total_loss.cpu().detach().numpy() / n_batch))
+            self.logger.info("Contrative Loss in epoch " + str(n) + ": "
+                             + str(total_con_loss.cpu().detach().numpy() / n_batch))
+            if n == n_epochs-1:
+                # torch.save(self.state_dict(), model_path + "/trained_corr_vae_model_last_run.pt")
+                torch.save(self, model_path + "/trained_corr_vae_model_last_run.pt")
+            # if self.lin_encoder and self.register_hook:
             if self.lin_encoder:
                 if n == n_epochs - 1:
                     # all_tumor_attn = np.stack(all_tumor_attn)
@@ -707,8 +727,7 @@ class CorrVAE(nn.Module):
             all_preds_df.to_csv(result_path + "_preds_no_type.csv")
             all_inputs_df.to_csv(result_path + "_inputs_no_type.csv")
         if lv_visualize:
-           self.lv_visualize(all_zs, all_types, type_name_dict)
-
+            self.lv_visualize(all_zs, all_types, type_name_dict)
 
         return total_r2, pcc, scc
 
@@ -834,7 +853,7 @@ class CorrVAE(nn.Module):
             # if i in draw_list:
             type_idx = zs_df[zs_df['DataType'] == i].index.tolist()
             type_name = type_name_dict[i]
-            plt.scatter(zs_2d[type_idx, 0], zs_2d[type_idx, 1], s=1, c=type_color_dict[type_name],label=type_name)
+            plt.scatter(zs_2d[type_idx, 0], zs_2d[type_idx, 1], s=1, c=type_color_dict[type_name], label=type_name)
         # plt.scatter(zs_2d[tumor_idx, 0], zs_2d[tumor_idx, 1], s=20, c="red")
         # plt.scatter(zs_2d[normal_idx, 0], zs_2d[normal_idx, 1], s=20, c="blue")
         plt.title('UMAP Visualization of Sample Embeddings')
@@ -1124,7 +1143,8 @@ class PtmCorrVAE(nn.Module):
             self.logger.info("Total AC validation PCC in epoch " + str(n) + ": " + str(ac_pcc))
             if total_ph_r2 > best_result:
                 best_result = total_ph_r2
-                torch.save(self, model_path + "/trained_corr_ptm_vae_model.pt")
+                # torch.save(self, model_path + "/trained_corr_ptm_vae_model.pt")
+                torch.save(self.state_dict(), model_path + "/trained_corr_ptm_vae_model.pt")
 
     def model_test(self, data_loader, result_path=None):
         n_batch = len(data_loader)
